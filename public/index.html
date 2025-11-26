@@ -310,7 +310,10 @@
                         </div>
                         
                         <div>
-                            <h3 class="font-bold mb-2 text-gray-400 text-sm">在线玩家</h3>
+                            <h3 class="font-bold mb-2 text-gray-400 text-base flex justify-between items-center">
+                                <span>在线玩家</span>
+                                <span v-if="gameDuration" class="text-sm text-emerald-400 font-mono">{{ gameDuration }}</span>
+                            </h3>
                             <ul class="space-y-1 text-sm">
                                 <li v-for="p in players" :key="p.id" class="flex items-center gap-2" :class="{'opacity-50': !p.isOnline}">
                                     <span class="w-2 h-2 rounded-full" :class="[p.isOnline ? (p.isHost ? 'bg-yellow-400' : 'bg-green-400') : 'bg-gray-500']"></span>
@@ -399,6 +402,38 @@
                 // 游戏限制相关
                 const gameLimits = ref({ maxQuestionsPerPlayer: null, maxTotalQuestions: null });
                 const settingsForm = ref({ maxQuestionsPerPlayer: '', maxTotalQuestions: '' });
+                
+                // 游戏时长相关
+                const gameStartTime = ref(null);
+                const gameDuration = ref('');
+                let durationTimer = null;
+
+                const updateDuration = () => {
+                    if (!gameStartTime.value) {
+                        gameDuration.value = '';
+                        return;
+                    }
+                    const now = Date.now();
+                    const diff = Math.floor((now - gameStartTime.value) / 1000);
+                    const hours = Math.floor(diff / 3600).toString().padStart(2, '0');
+                    const minutes = Math.floor((diff % 3600) / 60).toString().padStart(2, '0');
+                    const seconds = (diff % 60).toString().padStart(2, '0');
+                    gameDuration.value = `${hours}:${minutes}:${seconds}`;
+                };
+
+                const startDurationTimer = () => {
+                    if (durationTimer) clearInterval(durationTimer);
+                    updateDuration();
+                    durationTimer = setInterval(updateDuration, 1000);
+                };
+
+                const stopDurationTimer = () => {
+                    if (durationTimer) {
+                        clearInterval(durationTimer);
+                        durationTimer = null;
+                    }
+                    gameDuration.value = '';
+                };
                 
                 const { computed } = Vue;
                 
@@ -587,6 +622,10 @@
                                 if (state.limits) {
                                     gameLimits.value = state.limits;
                                 }
+                                if (state.startTime) {
+                                    gameStartTime.value = state.startTime;
+                                    startDurationTimer();
+                                }
                                 scrollToBottom();
                                 return;
                             }
@@ -644,6 +683,12 @@
                         if (state.limits) {
                             gameLimits.value = state.limits;
                         }
+                        if (state.startTime) {
+                            gameStartTime.value = state.startTime;
+                            startDurationTimer();
+                        } else {
+                            stopDurationTimer();
+                        }
                         scrollToBottom();
                     });
 
@@ -675,6 +720,11 @@
                             gameLimits.value = { maxQuestionsPerPlayer: null, maxTotalQuestions: null };
                         }
                         
+                        if (data.startTime) {
+                            gameStartTime.value = data.startTime;
+                            startDurationTimer();
+                        }
+
                         history.value = [];
                         gameOver.value = false;
                     });
@@ -707,6 +757,8 @@
                         history.value = [];
                         gameOver.value = false;
                         gameLimits.value = { maxQuestionsPerPlayer: null, maxTotalQuestions: null };
+                        gameStartTime.value = null;
+                        stopDurationTimer();
                     });
 
                     socket.on('error_message', (data) => {
@@ -932,7 +984,7 @@
                     showPreviewModal, previewPuzzle, previewPuzzleDetails, confirmStartPuzzle, requestHostCooldown,
                     serverConnected, showRecoveryDecision, showRecoveryWaiting, recoverGame, startNewGame,
                     isPuzzleExpanded, autoResize, gameLimits, settingsForm, myQuestionCount, publicUsedCount, canAskQuestion, questionPlaceholder,
-                    kickPlayer
+                    kickPlayer, gameDuration
                 };
             }
         }).mount('#app');

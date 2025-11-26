@@ -38,7 +38,8 @@ const saveGameState = () => {
                     isOnline: false // 重启后都视为离线
                 })),
                 savedAt: Date.now(),
-                limits: gameState.limits
+                limits: gameState.limits,
+                startTime: gameState.startTime
             };
             fs.writeFileSync(GAME_STATE_FILE, JSON.stringify(stateToSave, null, 2));
             console.log('Game state saved to file');
@@ -97,7 +98,8 @@ let gameState = {
     recoveryMode: hasRecoverableGame, // 标记是否为恢复模式
     recoveryDecisionMade: false, // 是否已经做出恢复决定
     waitingForRecoveryDecision: hasRecoverableGame, // 是否在等待恢复决定
-    limits: savedState?.limits || { maxQuestionsPerPlayer: null, maxTotalQuestions: null }
+    limits: savedState?.limits || { maxQuestionsPerPlayer: null, maxTotalQuestions: null },
+    startTime: savedState?.startTime || null
 };
 
 const broadcastPlayers = () => {
@@ -290,6 +292,7 @@ io.on('connection', (socket) => {
         gameState.currentPuzzle = null;
         gameState.history = [];
         gameState.players = [];
+        gameState.startTime = null;
         
         // 清除保存的游戏状态
         clearSavedGameState();
@@ -398,6 +401,7 @@ io.on('connection', (socket) => {
         gameState.currentPuzzle = newPuzzle;
         gameState.history = [];
         gameState.recoveryMode = false;
+        gameState.startTime = Date.now();
         gameState.limits = {
             maxQuestionsPerPlayer: puzzleData.maxQuestionsPerPlayer || null,
             maxTotalQuestions: puzzleData.maxTotalQuestions || null
@@ -406,7 +410,8 @@ io.on('connection', (socket) => {
         io.emit('new_puzzle', {
             title: newPuzzle.title,
             content: newPuzzle.content,
-            limits: gameState.limits
+            limits: gameState.limits,
+            startTime: gameState.startTime
         });
         
         socket.emit('puzzle_reveal', newPuzzle);
@@ -435,6 +440,7 @@ io.on('connection', (socket) => {
             gameState.currentPuzzle = puzzle;
             gameState.history = []; // 清空历史
             gameState.recoveryMode = false; // 开始新游戏，退出恢复模式
+            gameState.startTime = Date.now();
             gameState.limits = {
                 maxQuestionsPerPlayer: options.maxQuestionsPerPlayer || null,
                 maxTotalQuestions: options.maxTotalQuestions || null
@@ -444,7 +450,8 @@ io.on('connection', (socket) => {
             io.emit('new_puzzle', {
                 title: puzzle.title,
                 content: puzzle.content,
-                limits: gameState.limits
+                limits: gameState.limits,
+                startTime: gameState.startTime
             });
             
             // 单独发给主持人完整信息
@@ -601,6 +608,7 @@ io.on('connection', (socket) => {
         gameState.currentPuzzle = null;
         gameState.history = [];
         gameState.recoveryMode = false;
+        gameState.startTime = null;
         
         // 清理离线玩家
         for (let i = gameState.players.length - 1; i >= 0; i--) {
