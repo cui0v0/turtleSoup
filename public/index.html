@@ -165,7 +165,7 @@
 
                     <!-- 自定义题目模态框 -->
                     <div v-if="showCustomModal" class="fixed inset-0 bg-black/80 flex items-center justify-center z-50">
-                        <div class="bg-gray-800 p-6 rounded-lg w-full max-w-lg border border-gray-700 shadow-2xl">
+                        <div class="bg-gray-800 p-6 rounded-lg w-full max-w-lg border border-gray-700 shadow-2xl max-h-[90vh] overflow-y-auto">
                             <h3 class="text-xl font-bold mb-4 text-emerald-500">自定义海龟汤</h3>
                             <div class="space-y-4">
                                 <div>
@@ -173,12 +173,32 @@
                                     <input v-model="customForm.title" class="w-full bg-gray-700 rounded p-2 text-white focus:outline-none focus:border-emerald-500 border border-transparent" placeholder="例如：恐怖的电梯">
                                 </div>
                                 <div>
-                                    <label class="block text-sm text-gray-400 mb-1">汤面 (题目)</label>
-                                    <textarea v-model="customForm.content" rows="3" class="w-full bg-gray-700 rounded p-2 text-white focus:outline-none focus:border-emerald-500 border border-transparent" placeholder="描述玩家看到的情景..."></textarea>
+                                    <label class="block text-sm text-gray-400 mb-1">汤面 (题目) <span class="text-xs text-gray-500">- 文字和图片至少提供一种</span></label>
+                                    <textarea v-model="customForm.content" rows="3" class="w-full bg-gray-700 rounded p-2 text-white focus:outline-none focus:border-emerald-500 border border-transparent" placeholder="描述玩家看到的情景... (可选)"></textarea>
+                                    <div class="mt-2">
+                                        <label class="block text-xs text-gray-400 mb-1">图片 (可添加多张)</label>
+                                        <input type="file" @change="handleContentImageUpload" accept="image/*" multiple class="w-full text-sm text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-emerald-600 file:text-white hover:file:bg-emerald-700 file:cursor-pointer">
+                                        <div v-if="customForm.contentImages && customForm.contentImages.length > 0" class="mt-2 grid grid-cols-3 gap-2">
+                                            <div v-for="(img, index) in customForm.contentImages" :key="index" class="relative group">
+                                                <img :src="img" class="w-full h-20 object-cover rounded border border-gray-600">
+                                                <button @click="removeContentImage(index)" class="absolute top-1 right-1 bg-red-600 hover:bg-red-700 text-white rounded-full w-5 h-5 text-xs opacity-0 group-hover:opacity-100 transition cursor-pointer">×</button>
+                                            </div>
+                                        </div>
+                                    </div>
                                 </div>
                                 <div>
-                                    <label class="block text-sm text-gray-400 mb-1">汤底 (答案)</label>
-                                    <textarea v-model="customForm.answer" rows="3" class="w-full bg-gray-700 rounded p-2 text-white focus:outline-none focus:border-emerald-500 border border-transparent" placeholder="事情的真相是..."></textarea>
+                                    <label class="block text-sm text-gray-400 mb-1">汤底 (答案) <span class="text-xs text-gray-500">- 文字和图片至少提供一种</span></label>
+                                    <textarea v-model="customForm.answer" rows="3" class="w-full bg-gray-700 rounded p-2 text-white focus:outline-none focus:border-emerald-500 border border-transparent" placeholder="事情的真相是... (可选)"></textarea>
+                                    <div class="mt-2">
+                                        <label class="block text-xs text-gray-400 mb-1">图片 (可添加多张)</label>
+                                        <input type="file" @change="handleAnswerImageUpload" accept="image/*" multiple class="w-full text-sm text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-emerald-600 file:text-white hover:file:bg-emerald-700 file:cursor-pointer">
+                                        <div v-if="customForm.answerImages && customForm.answerImages.length > 0" class="mt-2 grid grid-cols-3 gap-2">
+                                            <div v-for="(img, index) in customForm.answerImages" :key="index" class="relative group">
+                                                <img :src="img" class="w-full h-20 object-cover rounded border border-gray-600">
+                                                <button @click="removeAnswerImage(index)" class="absolute top-1 right-1 bg-red-600 hover:bg-red-700 text-white rounded-full w-5 h-5 text-xs opacity-0 group-hover:opacity-100 transition cursor-pointer">×</button>
+                                            </div>
+                                        </div>
+                                    </div>
                                 </div>
                                 
                                 <!-- 游戏设置 -->
@@ -215,11 +235,23 @@
 
                         <!-- 移动端视图 (可折叠) -->
                         <div class="md:hidden cursor-pointer group" @click="isPuzzleExpanded = !isPuzzleExpanded">
-                            <p :class="{'line-clamp-1': !isPuzzleExpanded}" class="text-lg leading-relaxed text-gray-200 mb-1 transition-all">{{ currentPuzzle.content }}</p>
+                            <p v-if="currentPuzzle.content" :class="{'line-clamp-1': !isPuzzleExpanded}" class="text-lg leading-relaxed text-gray-200 mb-1 transition-all">{{ currentPuzzle.content }}</p>
+                            <div v-if="currentPuzzle.contentImages && currentPuzzle.contentImages.length > 0 && isPuzzleExpanded" class="grid gap-2 mb-2" :class="{
+                                'grid-cols-1': currentPuzzle.contentImages.length === 1,
+                                'grid-cols-2': currentPuzzle.contentImages.length >= 2
+                            }">
+                                <img v-for="(img, index) in currentPuzzle.contentImages" :key="index" :src="img" class="w-full rounded border border-gray-600" @click.stop="openImageModal(img)">
+                            </div>
                             
                             <div v-if="(isHost || gameOver) && isPuzzleExpanded" class="mt-1 p-3 bg-gray-900 rounded border border-gray-700 text-base">
                                 <h3 class="font-bold text-red-400 mb-1">汤底:</h3>
-                                <p class="text-gray-300">{{ currentPuzzle.answer }}</p>
+                                <p v-if="currentPuzzle.answer" class="text-gray-300 mb-2">{{ currentPuzzle.answer }}</p>
+                                <div v-if="currentPuzzle.answerImages && currentPuzzle.answerImages.length > 0" class="grid gap-2" :class="{
+                                    'grid-cols-1': currentPuzzle.answerImages.length === 1,
+                                    'grid-cols-2': currentPuzzle.answerImages.length >= 2
+                                }">
+                                    <img v-for="(img, index) in currentPuzzle.answerImages" :key="index" :src="img" class="w-full rounded border border-gray-600" @click.stop="openImageModal(img)">
+                                </div>
                             </div>
 
                             <p v-if="!isPuzzleExpanded" class="text-xs text-gray-500 text-center mt-1 group-hover:text-emerald-400">▼ 点击展开详情</p>
@@ -228,11 +260,25 @@
 
                         <!-- PC端视图 (总是完整显示) -->
                         <div class="hidden md:block">
-                            <p class="text-lg leading-relaxed text-gray-200 mb-4">{{ currentPuzzle.content }}</p>
+                            <p v-if="currentPuzzle.content" class="text-lg leading-relaxed text-gray-200 mb-4">{{ currentPuzzle.content }}</p>
+                            <div v-if="currentPuzzle.contentImages && currentPuzzle.contentImages.length > 0" class="grid gap-2 mb-4" :class="{
+                                'grid-cols-1': currentPuzzle.contentImages.length === 1,
+                                'grid-cols-2': currentPuzzle.contentImages.length === 2,
+                                'grid-cols-3': currentPuzzle.contentImages.length >= 3
+                            }">
+                                <img v-for="(img, index) in currentPuzzle.contentImages" :key="index" :src="img" class="w-full rounded border border-gray-600 cursor-pointer" @click="openImageModal(img)">
+                            </div>
                             
                             <div v-if="isHost || gameOver" class="mt-6 p-4 bg-gray-900 rounded border border-gray-700">
                                 <h3 class="text-sm font-bold text-red-400 mb-1">汤底 (Answer):</h3>
-                                <p class="text-gray-300">{{ currentPuzzle.answer }}</p>
+                                <p v-if="currentPuzzle.answer" class="text-gray-300 mb-2">{{ currentPuzzle.answer }}</p>
+                                <div v-if="currentPuzzle.answerImages && currentPuzzle.answerImages.length > 0" class="grid gap-2" :class="{
+                                    'grid-cols-1': currentPuzzle.answerImages.length === 1,
+                                    'grid-cols-2': currentPuzzle.answerImages.length === 2,
+                                    'grid-cols-3': currentPuzzle.answerImages.length >= 3
+                                }">
+                                    <img v-for="(img, index) in currentPuzzle.answerImages" :key="index" :src="img" class="w-full rounded border border-gray-600 cursor-pointer" @click="openImageModal(img)">
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -349,6 +395,14 @@
             </div>
         </div>
 
+        <!-- 图片查看模态框 -->
+        <div v-if="showImageModal" @click="closeImageModal" class="fixed inset-0 bg-black/95 flex items-center justify-center z-[70] cursor-pointer">
+            <div class="max-w-[95vw] max-h-[95vh] relative">
+                <img :src="currentImageSrc" class="max-w-full max-h-[95vh] object-contain">
+                <button @click.stop="closeImageModal" class="absolute top-4 right-4 bg-red-600 hover:bg-red-700 text-white rounded-full w-10 h-10 text-2xl cursor-pointer">×</button>
+            </div>
+        </div>
+
         <!-- 服务器断开连接警告 -->
         <div v-if="!serverConnected && !showRecoveryDecision && !showRecoveryWaiting" class="fixed bottom-0 left-0 right-0 bg-red-600 text-white py-3 px-4 shadow-lg z-50 animate-pulse">
             <div class="container mx-auto flex items-center justify-center gap-3">
@@ -379,8 +433,12 @@
                 
                 // 自定义题目相关
                 const showCustomModal = ref(false);
-                const customForm = ref({ title: '', content: '', answer: '' });
+                const customForm = ref({ title: '', content: '', answer: '', contentImages: [], answerImages: [] });
                 const hasHost = ref(false); // 是否已有主持人
+                
+                // 图片查看相关
+                const showImageModal = ref(false);
+                const currentImageSrc = ref('');
                 const persistRole = (hostFlag) => {
                     localStorage.setItem('turtle_role', hostFlag ? 'host' : 'player');
                 };
@@ -842,8 +900,24 @@
                 };
                 
                 const submitCustomPuzzle = () => {
-                    if (!customForm.value.title || !customForm.value.content || !customForm.value.answer) {
-                        alert('请填写完整信息');
+                    if (!customForm.value.title) {
+                        alert('请填写标题');
+                        return;
+                    }
+                    
+                    // 验证汤面：文字或图片至少有一个
+                    const hasContentText = customForm.value.content && customForm.value.content.trim();
+                    const hasContentImages = customForm.value.contentImages && customForm.value.contentImages.length > 0;
+                    if (!hasContentText && !hasContentImages) {
+                        alert('汤面必须提供文字或图片（至少一种）');
+                        return;
+                    }
+                    
+                    // 验证汤底：文字或图片至少有一个
+                    const hasAnswerText = customForm.value.answer && customForm.value.answer.trim();
+                    const hasAnswerImages = customForm.value.answerImages && customForm.value.answerImages.length > 0;
+                    if (!hasAnswerText && !hasAnswerImages) {
+                        alert('汤底必须提供文字或图片（至少一种）');
                         return;
                     }
                     
@@ -860,7 +934,7 @@
                     socket.emit('create_custom_puzzle', payload);
                     
                     showCustomModal.value = false;
-                    customForm.value = { title: '', content: '', answer: '' };
+                    customForm.value = { title: '', content: '', answer: '', contentImages: [], answerImages: [] };
                     // 重置设置表单
                     settingsForm.value = { maxQuestionsPerPlayer: '', maxTotalQuestions: '' };
                 };
@@ -976,6 +1050,62 @@
                     }
                 };
 
+                const handleContentImageUpload = (event) => {
+                    const files = event.target.files;
+                    if (!files || files.length === 0) return;
+                    
+                    Array.from(files).forEach(file => {
+                        if (file.type.startsWith('image/')) {
+                            const reader = new FileReader();
+                            reader.onload = (e) => {
+                                if (!customForm.value.contentImages) {
+                                    customForm.value.contentImages = [];
+                                }
+                                customForm.value.contentImages.push(e.target.result);
+                            };
+                            reader.readAsDataURL(file);
+                        }
+                    });
+                    event.target.value = '';
+                };
+                
+                const handleAnswerImageUpload = (event) => {
+                    const files = event.target.files;
+                    if (!files || files.length === 0) return;
+                    
+                    Array.from(files).forEach(file => {
+                        if (file.type.startsWith('image/')) {
+                            const reader = new FileReader();
+                            reader.onload = (e) => {
+                                if (!customForm.value.answerImages) {
+                                    customForm.value.answerImages = [];
+                                }
+                                customForm.value.answerImages.push(e.target.result);
+                            };
+                            reader.readAsDataURL(file);
+                        }
+                    });
+                    event.target.value = '';
+                };
+                
+                const removeContentImage = (index) => {
+                    customForm.value.contentImages.splice(index, 1);
+                };
+                
+                const removeAnswerImage = (index) => {
+                    customForm.value.answerImages.splice(index, 1);
+                };
+                
+                const openImageModal = (src) => {
+                    currentImageSrc.value = src;
+                    showImageModal.value = true;
+                };
+                
+                const closeImageModal = () => {
+                    showImageModal.value = false;
+                    currentImageSrc.value = '';
+                };
+
                 return {
                     joined, nickname, myId, isHost, players, puzzleList, 
                     currentPuzzle, history, questionText, customAnswers, gameOver,
@@ -984,7 +1114,9 @@
                     showPreviewModal, previewPuzzle, previewPuzzleDetails, confirmStartPuzzle, requestHostCooldown,
                     serverConnected, showRecoveryDecision, showRecoveryWaiting, recoverGame, startNewGame,
                     isPuzzleExpanded, autoResize, gameLimits, settingsForm, myQuestionCount, publicUsedCount, canAskQuestion, questionPlaceholder,
-                    kickPlayer, gameDuration
+                    kickPlayer, gameDuration,
+                    handleContentImageUpload, handleAnswerImageUpload, removeContentImage, removeAnswerImage,
+                    showImageModal, currentImageSrc, openImageModal, closeImageModal
                 };
             }
         }).mount('#app');
