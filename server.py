@@ -7,6 +7,7 @@ Turtle Soup Game Server - Python版本
 import json
 import os
 import time
+import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Any
@@ -14,6 +15,10 @@ from typing import Dict, List, Optional, Any
 from flask import Flask, send_from_directory
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
+
+# 禁用 Flask 的 HTTP 请求日志
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR)
 
 print('=== Starting Turtle Soup Server (Python) ===')
 
@@ -26,8 +31,8 @@ socketio = SocketIO(
     app,
     cors_allowed_origins="*",
     max_http_buffer_size=30 * 1024 * 1024,  # 30MB 支持图片上传
-    ping_timeout=60,
-    ping_interval=25,
+    ping_timeout=10,  # 减少超时时间，更快检测断线（从60秒改为10秒）
+    ping_interval=5,   # 减少心跳间隔（从25秒改为5秒）
     async_mode='threading',  # 使用 threading 模式（与 Python 3.13 兼容）
     logger=False,
     engineio_logger=False,
@@ -73,6 +78,8 @@ class GameState:
             'maxTotalQuestions': None
         }
         self.start_time: Optional[int] = None
+        self.game_over: bool = False
+        self.end_time: Optional[int] = None
         self.server_session_id: str = str(int(time.time() * 1000))
 
     def to_dict(self) -> Dict:
@@ -85,10 +92,100 @@ class GameState:
             'recoveryMode': self.recovery_mode,
             'waitingForRecoveryDecision': self.waiting_for_recovery_decision,
             'limits': self.limits,
-            'startTime': self.start_time
+            'startTime': self.start_time,
+            'gameOver': self.game_over,
+            'endTime': self.end_time
         }
 
 game_state = GameState()
+
+# 计算剩余次数（为每个玩家）
+def calculate_remaining_counts(user_id: str) -> Dict:
+    """
+    计算当前玩家的剩余提问次数
+    返回：{
+        'personalRemaining': int | None,  # 个人配额剩余
+        'personalUsed': int,              # 个人已用
+        'personalTotal': int | None,      # 个人总额
+        'publicRemaining': int | None,    # 公共池剩余
+        'publicUsed': int,                # 公共池已用
+        'publicTotal': int | None,        # 公共池总额
+        'totalUsed': int,                 # 全局总已用
+        'canAsk': bool                    # 是否还能提问
+    }
+    """
+    limits = game_state.limits
+    
+    # 统计每个玩家的已提问次数
+    player_counts = {p['userId']: 0 for p in game_state.players}
+    for q in game_state.history:
+        if q['userId'] in player_counts:
+            player_counts[q['userId']] += 1
+    
+    my_used = player_counts.get(user_id, 0)
+    total_used = len(game_state.history)
+    
+    # 初始化返回值
+    result = {
+        'personalRemaining': None,
+        'personalUsed': my_used,
+        'personalTotal': limits['maxQuestionsPerPlayer'],
+        'publicRemaining': None,
+        'publicUsed': 0,
+        'publicTotal': limits['maxTotalQuestions'],
+        'totalUsed': total_used,
+        'canAsk': True
+    }
+    
+    # 情兵1: 仅有公共总限制
+    if not limits['maxQuestionsPerPlayer'] and limits['maxTotalQuestions']:
+        result['publicRemaining'] = max(0, limits['maxTotalQuestions'] - total_used)
+        result['publicUsed'] = total_used
+        result['canAsk'] = total_used < limits['maxTotalQuestions']
+    
+    # 情兵2: 仅有个人限制
+    elif limits['maxQuestionsPerPlayer'] and not limits['maxTotalQuestions']:
+        result['personalRemaining'] = max(0, limits['maxQuestionsPerPlayer'] - my_used)
+        result['canAsk'] = my_used < limits['maxQuestionsPerPlayer']
+    
+    # 情兵3: 同时有个人限制和公共限制（分层机制）
+    elif limits['maxQuestionsPerPlayer'] and limits['maxTotalQuestions']:
+        # 个人配额
+        result['personalRemaining'] = max(0, limits['maxQuestionsPerPlayer'] - my_used)
+        
+        # 计算公共池已用次数（超出个人配额的部分）
+        public_used = 0
+        for uid, count in player_counts.items():
+            if count > limits['maxQuestionsPerPlayer']:
+                public_used += count - limits['maxQuestionsPerPlayer']
+        
+        result['publicUsed'] = public_used
+        result['publicRemaining'] = max(0, limits['maxTotalQuestions'] - public_used)
+        
+        # 判断是否还能提问
+        if my_used < limits['maxQuestionsPerPlayer']:
+            # 还有个人配额
+            result['canAsk'] = True
+        else:
+            # 个人配额用完，检查是否所有人都用完了
+            online_players = [p for p in game_state.players if p.get('isOnline', False) and not p['isHost']]
+            someone_has_quota = any(
+                player_counts.get(p['userId'], 0) < limits['maxQuestionsPerPlayer'] 
+                for p in online_players
+            )
+            
+            if someone_has_quota:
+                # 还有人有个人配额，不能使用公共池
+                result['canAsk'] = False
+            else:
+                # 所有人都用完个人配额，检查公共池
+                result['canAsk'] = public_used < limits['maxTotalQuestions']
+    
+    # 情兵4: 无任何限制
+    else:
+        result['canAsk'] = True
+    
+    return result
 
 # 持久化相关函数
 def save_game_state():
@@ -109,7 +206,9 @@ def save_game_state():
                 ],
                 'savedAt': int(time.time() * 1000),
                 'limits': game_state.limits,
-                'startTime': game_state.start_time
+                'startTime': game_state.start_time,
+                'gameOver': game_state.game_over,
+                'endTime': game_state.end_time
             }
             with open(GAME_STATE_FILE, 'w', encoding='utf-8') as f:
                 json.dump(state_to_save, f, ensure_ascii=False, indent=2)
@@ -157,6 +256,8 @@ if saved_state:
     game_state.players = saved_state.get('players', [])
     game_state.limits = saved_state.get('limits', {'maxQuestionsPerPlayer': None, 'maxTotalQuestions': None})
     game_state.start_time = saved_state.get('startTime')
+    game_state.game_over = saved_state.get('gameOver', False)
+    game_state.end_time = saved_state.get('endTime')
     game_state.recovery_mode = True
     game_state.waiting_for_recovery_decision = True
     print('✓ Game state will be available for recovery')
@@ -166,7 +267,23 @@ else:
 # 工具函数
 def broadcast_players():
     """广播玩家列表更新"""
-    socketio.emit('player_update', game_state.players)
+    # 为每个玩家计算剩余次数
+    players_with_counts = []
+    for player in game_state.players:
+        player_data = player.copy()
+        # 只为非主持人计算剩余次数
+        if not player['isHost'] and game_state.current_puzzle:
+            player_data['remainingCounts'] = calculate_remaining_counts(player['userId'])
+        players_with_counts.append(player_data)
+    
+    socketio.emit('player_update', players_with_counts)
+
+def broadcast_remaining_counts():
+    """广播所有在线玩家的剩余次数"""
+    for player in game_state.players:
+        if player.get('isOnline', False) and player.get('id'):
+            remaining_info = calculate_remaining_counts(player['userId'])
+            socketio.emit('remaining_counts_update', remaining_info, room=player['id'])
 
 def reset_lobby_state():
     """重置大厅状态"""
@@ -174,6 +291,12 @@ def reset_lobby_state():
         return
     game_state.current_puzzle = None
     game_state.history = []
+    game_state.start_time = None
+    # 重置限制配置
+    game_state.limits = {
+        'maxQuestionsPerPlayer': None,
+        'maxTotalQuestions': None
+    }
     socketio.emit('return_to_lobby')
 
 def remove_player_by_index(index: int) -> Optional[Dict]:
@@ -283,13 +406,17 @@ def handle_join(data):
             online_count = sum(1 for p in game_state.players if p.get('isOnline', False))
             is_first_reconnector = online_count == 1 and game_state.waiting_for_recovery_decision
             
+            # 计算剩余次数
+            remaining_info = calculate_remaining_counts(saved_player['userId'])
+            
             state_dict = game_state.to_dict()
             state_dict.update({
                 'myId': request.sid,
                 'userId': saved_player['userId'],
                 'serverSessionId': game_state.server_session_id,
                 'puzzles': puzzles if saved_player['isHost'] else [],
-                'isFirstReconnector': is_first_reconnector
+                'isFirstReconnector': is_first_reconnector,
+                'remainingCounts': remaining_info
             })
             emit('init_state', state_dict)
             broadcast_players()
@@ -338,12 +465,16 @@ def handle_join(data):
             game_state.host_id = request.sid
         print(f'Player joined: {player["nickname"]} [{client_ip}]')
     
+    # 计算剩余次数
+    remaining_info = calculate_remaining_counts(player['userId'])
+    
     state_dict = game_state.to_dict()
     state_dict.update({
         'myId': request.sid,
         'userId': player['userId'],
         'serverSessionId': game_state.server_session_id,
-        'puzzles': puzzles if player['isHost'] else []
+        'puzzles': puzzles if player['isHost'] else [],
+        'remainingCounts': remaining_info
     })
     emit('init_state', state_dict)
     broadcast_players()
@@ -384,11 +515,27 @@ def handle_recovery_decision(recover):
         game_state.recovery_mode = False
         game_state.current_puzzle = None
         game_state.history = []
-        game_state.players = []
+        game_state.game_over = False
+        game_state.end_time = None
+        # 保留当前在线的玩家，但重置他们的主持人状态
+        for player in game_state.players:
+            if player.get('isOnline', False):
+                player['isHost'] = False
+        game_state.host_id = None
         game_state.start_time = None
+        # 重置限制配置
+        game_state.limits = {
+            'maxQuestionsPerPlayer': None,
+            'maxTotalQuestions': None
+        }
         
         clear_saved_game_state()
+        # 先发送决定通知
         socketio.emit('recovery_decision_made', {'recover': False})
+        # 延迟一点让前端处理完再广播玩家列表
+        import time
+        time.sleep(0.1)
+        broadcast_players()
 
 @socketio.on('recover_game')
 def handle_recover_game():
@@ -498,7 +645,8 @@ def handle_create_custom_puzzle(puzzle_data):
         'content': puzzle_data.get('content', ''),
         'answer': puzzle_data.get('answer', ''),
         'contentImages': puzzle_data.get('contentImages', []),
-        'answerImages': puzzle_data.get('answerImages', [])
+        'answerImages': puzzle_data.get('answerImages', []),
+        'tags': puzzle_data.get('tags', {'isLogical': False, 'hasDeath': False, 'isHuman': True})
     }
     
     puzzles.append(new_puzzle)
@@ -517,6 +665,7 @@ def handle_create_custom_puzzle(puzzle_data):
         'title': new_puzzle['title'],
         'content': new_puzzle['content'],
         'contentImages': new_puzzle.get('contentImages', []),
+        'tags': new_puzzle.get('tags'),
         'limits': game_state.limits,
         'startTime': game_state.start_time
     })
@@ -542,6 +691,11 @@ def handle_select_puzzle(data):
     
     puzzle = next((p for p in puzzles if p['id'] == puzzle_id), None)
     if puzzle:
+        # 应用标签（options中的优先，否则使用题目原有的）
+        if 'tags' in options:
+            puzzle = puzzle.copy()
+            puzzle['tags'] = options['tags']
+        
         game_state.current_puzzle = puzzle
         game_state.history = []
         game_state.recovery_mode = False
@@ -555,6 +709,7 @@ def handle_select_puzzle(data):
             'title': puzzle['title'],
             'content': puzzle['content'],
             'contentImages': puzzle.get('contentImages', []),
+            'tags': puzzle.get('tags'),
             'limits': game_state.limits,
             'startTime': game_state.start_time
         })
@@ -563,8 +718,8 @@ def handle_select_puzzle(data):
         save_game_state()
 
 @socketio.on('ask_question')
-def handle_ask_question(text):
-    """玩家提问"""
+def handle_ask_question():
+    """玩家发起猜测请求"""
     from flask import request
     
     if not game_state.current_puzzle:
@@ -578,7 +733,7 @@ def handle_ask_question(text):
     # 检查是否有未回答的问题
     has_pending = any(q['userId'] == player['userId'] and q['status'] == 'pending' for q in game_state.history)
     if has_pending:
-        emit('error_message', {'message': '请等待主持人回答上一条提问后再发送新的提问'})
+        emit('error_message', {'message': '请等待主持人处理上一条猜测后再发送新的猜测'})
         return
     
     # 统计每个玩家的已提问次数
@@ -634,24 +789,29 @@ def handle_ask_question(text):
         'playerId': request.sid,
         'userId': player['userId'],
         'nickname': player['nickname'],
-        'question': text,
+        'question': '',  # 等待主持人填写问题内容
         'answer': None,
         'status': 'pending'
     }
     
     game_state.history.append(question_entry)
     socketio.emit('new_question', question_entry)
+    
+    # 广播更新所有玩家的剩余次数
+    broadcast_remaining_counts()
+    
     save_game_state()
 
 @socketio.on('answer_question')
 def handle_answer_question(data):
-    """主持人回答"""
+    """主持人填写问题并回答"""
     from flask import request
     
     if request.sid != game_state.host_id:
         return
     
     question_id = data['questionId']
+    question_text = data.get('questionText', '')  # 主持人填写的问题内容
     answer_type = data['answerType']
     custom_text = data.get('customText', '')
     
@@ -660,11 +820,13 @@ def handle_answer_question(data):
         answer_map = {
             'yes': '是',
             'no': '不是',
+            'maybe': '是或不是',
             'irrelevant': '与此无关',
             'custom': custom_text
         }
         answer_text = answer_map.get(answer_type, '')
         
+        game_state.history[q_index]['question'] = question_text  # 更新问题内容
         game_state.history[q_index]['answer'] = answer_text
         game_state.history[q_index]['answerType'] = answer_type
         game_state.history[q_index]['status'] = 'answered'
@@ -682,7 +844,19 @@ def handle_reveal_answer():
     if not game_state.current_puzzle:
         return
     
-    socketio.emit('game_over', game_state.current_puzzle['answer'])
+    # 设置游戏结束状态和结束时间
+    game_state.game_over = True
+    game_state.end_time = int(time.time() * 1000)
+    
+    # 向所有玩家发送游戏结束事件，包含完整的题目信息和结束时间
+    socketio.emit('game_over', {
+        'puzzle': game_state.current_puzzle,
+        'gameOver': True,
+        'endTime': game_state.end_time
+    })
+    
+    # 保存游戏状态
+    save_game_state()
 
 @socketio.on('update_puzzle')
 def handle_update_puzzle(data):
@@ -713,6 +887,7 @@ def handle_update_puzzle(data):
     game_state.current_puzzle['answer'] = data.get('answer', '')
     game_state.current_puzzle['contentImages'] = data.get('contentImages', [])
     game_state.current_puzzle['answerImages'] = data.get('answerImages', [])
+    game_state.current_puzzle['tags'] = data.get('tags', {'isLogical': False, 'hasDeath': False, 'isHuman': True})
     
     # 更新次数限制（正确处理 0 值）
     game_state.limits = {
@@ -730,13 +905,21 @@ def handle_update_puzzle(data):
         'puzzle': {
             'title': game_state.current_puzzle['title'],
             'content': game_state.current_puzzle['content'],
-            'contentImages': game_state.current_puzzle.get('contentImages', [])
+            'contentImages': game_state.current_puzzle.get('contentImages', []),
+            'tags': game_state.current_puzzle.get('tags')
         },
         'limits': game_state.limits
     })
     
     # 单独给主持人发送完整题目
     emit('puzzle_reveal', game_state.current_puzzle)
+    
+    # 重新计算并广播所有玩家的剩余次数
+    broadcast_remaining_counts()
+    
+    # 广播更新玩家列表（包含每个玩家的剩余次数）
+    broadcast_players()
+    
     save_game_state()
     
     print(f'[UPDATE_PUZZLE] Successfully updated puzzle: {game_state.current_puzzle["title"]}')
@@ -753,6 +936,8 @@ def handle_return_to_lobby():
     game_state.history = []
     game_state.recovery_mode = False
     game_state.start_time = None
+    game_state.game_over = False
+    game_state.end_time = None
     
     # 清理离线玩家
     game_state.players = [p for p in game_state.players if p.get('isOnline', False)]
@@ -764,7 +949,7 @@ def handle_return_to_lobby():
     emit('host_data', puzzles)
 
 if __name__ == '__main__':
-    PORT = int(os.environ.get('PORT', 5000))
+    PORT = int(os.environ.get('PORT', 3000))
     print(f'\n✓ Starting server on port {PORT}...')
     print(f'✓ 本机使用IP: http://localhost:{PORT}')
     print(f'✓ Server ready to accept connections\n')

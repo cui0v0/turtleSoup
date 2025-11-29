@@ -3,3 +3,5 @@ node_modules/
 .venv/
 .DS_Store
 TEST_GUIDE.md
+start_server.sh
+server.js
