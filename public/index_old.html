@@ -1,0 +1,1580 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>海龟汤 Online</title>
+    <script src="./tailwindcss_browser@4.js"></script>
+    <script src="./vue.global.min.js"></script>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <style>
+        .chat-bubble { max-width: 80%; }
+        .fade-enter-active, .fade-leave-active { transition: opacity 0.5s; }
+        .fade-enter-from, .fade-leave-to { opacity: 0; }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+        .animate-pulse {
+            animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen">
+    <div id="app" class="container mx-auto p-4 max-w-4xl pb-24 md:pb-4">
+        
+        <!-- 登录界面 -->
+        <div v-if="!joined" class="flex flex-col items-center justify-center h-screen">
+            <h1 class="text-6xl font-bold mb-8 text-emerald-500">🐢 海龟汤</h1>
+            <div class="bg-gray-800 p-8 rounded-lg shadow-lg w-full max-w-md">
+                <label class="block mb-2 text-lg">请输入昵称</label>
+                <input v-model="nickname" @keyup.enter="joinGame" type="text" class="w-full p-3 rounded bg-gray-700 border border-gray-600 focus:border-emerald-500 focus:outline-none mb-4" placeholder="你的名字...">
+                <button @click="joinGame" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3 rounded transition cursor-pointer">进入房间</button>
+            </div>
+        </div>
+
+        <!-- 游戏主界面 -->
+        <div v-else>
+            <!-- 顶部栏 -->
+            <header class="flex justify-between items-center mb-6 bg-gray-800 p-4 rounded-lg">
+                <div>
+                    <h1 class="text-2xl font-bold text-emerald-500">海龟汤 Online</h1>
+                    <p class="text-sm text-gray-400">当前身份: <span :class="isHost ? 'text-yellow-400 font-bold' : 'text-blue-400'">{{ isHost ? '主持人 (Host)' : '侦探 (Player)' }}</span></p>
+                </div>
+                <div class="flex items-center gap-4">
+                    <div class="text-right">
+                        <p class="text-sm">在线人数: {{ players.length }}</p>
+                        <p class="text-xs text-gray-500">{{ nickname }}</p>
+                    </div>
+                    <button v-if="!isHost && !hasHost && !currentPuzzle" @click="claimHost" class="text-xs bg-yellow-600 hover:bg-yellow-700 px-3 py-1 rounded text-white font-bold animate-pulse">成为主持人</button>
+                    <button v-if="!isHost && hasHost && !currentPuzzle" @click="requestHost" :disabled="requestHostCooldown" :class="requestHostCooldown ? 'opacity-50 cursor-not-allowed' : ''" class="text-xs bg-emerald-600 hover:bg-emerald-700 px-2 py-1 rounded">申请主持</button>
+                    <button v-if="isHost && !currentPuzzle" @click="resignHost" class="text-xs bg-red-600 hover:bg-red-700 px-3 py-1 rounded text-white">退出主持</button>
+                </div>
+            </header>
+
+            <!-- 主持人选择弹窗 (仅当没有主持人且自己不是主持人时显示) -->
+            <div v-if="!hasHost && !isHost" class="fixed inset-0 bg-black/80 flex items-center justify-center z-50">
+                <div class="bg-gray-800 p-8 rounded-lg w-full max-w-md border border-yellow-500 shadow-2xl text-center">
+                    <h2 class="text-3xl font-bold mb-4 text-yellow-400">🐢 谁来当海龟？</h2>
+                    <p class="text-gray-300 mb-8">当前房间还没有主持人。<br>你想成为主持人出题吗？</p>
+                    <div class="flex flex-col gap-4">
+                        <button @click="claimHost" class="w-full bg-yellow-600 hover:bg-yellow-700 text-white font-bold py-3 rounded transition text-lg cursor-pointer">
+                            我来当主持人！
+                        </button>
+                        <p class="text-sm text-gray-500">或者等待其他人成为主持人...</p>
+                    </div>
+                </div>
+            </div>
+            <!-- 恢复游戏决定弹窗 (第一个重连的玩家) -->
+            <div v-if="showRecoveryDecision" class="fixed inset-0 bg-black/90 flex items-center justify-center z-[60]">
+                <div class="bg-gray-800 p-8 rounded-lg w-full max-w-lg border border-blue-500 shadow-2xl">
+                    <h2 class="text-3xl font-bold mb-4 text-blue-400">🔄 发现上一场游戏记录</h2>
+                    <p class="text-gray-300 mb-6 text-lg">检测到服务器重启前有未完成的游戏对局，是否要恢复？</p>
+                    <div class="bg-blue-900/30 border border-blue-600 rounded p-4 mb-6">
+                        <p class="text-blue-200 text-sm">✓ 恢复游戏将保留所有推理历史和题目信息</p>
+                        <p class="text-blue-200 text-sm mt-2">✓ 所有玩家将恢复原有的昵称和角色</p>
+                    </div>
+                    <div class="flex gap-4">
+                        <button @click="startNewGame" class="flex-1 bg-gray-600 hover:bg-gray-500 text-white font-bold py-3 rounded transition cursor-pointer">
+                            重开新局
+                        </button>
+                        <button @click="recoverGame" class="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded transition cursor-pointer">
+                            恢复游戏
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 等待恢复决定弹窗 (其他玩家) -->
+            <div v-if="showRecoveryWaiting" class="fixed inset-0 bg-black/90 flex items-center justify-center z-[55]">
+                <div class="bg-gray-800 p-8 rounded-lg w-full max-w-md border border-yellow-500 shadow-2xl text-center">
+                    <div class="mb-6">
+                        <svg class="animate-spin h-16 w-16 text-yellow-400 mx-auto" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                    </div>
+                    <h2 class="text-2xl font-bold mb-4 text-yellow-400">⏳ 等待决定中...</h2>
+                    <p class="text-gray-300 text-lg">其他玩家正在决定是否恢复上一场游戏</p>
+                    <p class="text-gray-500 text-sm mt-4">请稍候</p>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                
+                <!-- 左侧/上方：题目区域 -->
+                <div class="md:col-span-2 space-y-6">
+                    <!-- 选题区域 (仅主持人且无题目时显示) -->
+                    <div v-if="isHost && !currentPuzzle" class="bg-gray-800 p-6 rounded-lg shadow-lg">
+                        <div class="flex justify-between items-center mb-4">
+                            <h2 class="text-xl font-bold text-yellow-400">选择一个汤面</h2>
+                            <button @click="showCustomModal = true" class="text-sm bg-emerald-600 hover:bg-emerald-700 px-3 py-1 rounded text-white transition cursor-pointer">+ 自定义</button>
+                        </div>
+                        <div class="space-y-2 max-h-96 overflow-y-auto">
+                            <div v-for="p in puzzleList" :key="p.id" @click="previewPuzzleDetails(p)" 
+                                class="p-4 bg-gray-700 hover:bg-gray-600 rounded cursor-pointer transition border-l-4 border-transparent hover:border-yellow-400">
+                                <h3 class="font-bold">{{ p.title }}</h3>
+                                <p class="text-sm text-gray-400 truncate">{{ p.content }}</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 题目预览模态框 -->
+                    <div v-if="showPreviewModal && previewPuzzle" class="fixed inset-0 bg-black/80 flex items-center justify-center z-50">
+                        <div class="bg-gray-800 p-6 rounded-lg w-full max-w-2xl border border-gray-700 shadow-2xl max-h-[90vh] overflow-y-auto">
+                            <h3 class="text-2xl font-bold mb-4 text-yellow-400">{{ previewPuzzle.title }}</h3>
+                            <div class="space-y-4">
+                                <div>
+                                    <label class="block text-sm font-bold text-emerald-400 mb-2">汤面 (题目)</label>
+                                    <div class="bg-gray-900 rounded p-4 text-gray-200 border border-gray-700">
+                                        <p v-if="previewPuzzle.content">{{ previewPuzzle.content }}</p>
+                                        <div v-if="previewPuzzle.contentImages && previewPuzzle.contentImages.length > 0" class="flex flex-col gap-2 mt-2">
+                                            <img v-for="(img, index) in previewPuzzle.contentImages" :key="index" :src="img" class="w-full rounded border border-gray-600 cursor-pointer" @click.stop="openImageModal(img, previewPuzzle.contentImages, index)">
+                                        </div>
+                                    </div>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-bold text-red-400 mb-2">汤底 (答案)</label>
+                                    <div class="bg-gray-900 rounded p-4 text-gray-200 border border-gray-700">
+                                        <p v-if="previewPuzzle.answer">{{ previewPuzzle.answer }}</p>
+                                        <div v-if="previewPuzzle.answerImages && previewPuzzle.answerImages.length > 0" class="flex flex-col gap-2 mt-2">
+                                            <img v-for="(img, index) in previewPuzzle.answerImages" :key="index" :src="img" class="w-full rounded border border-gray-600 cursor-pointer" @click.stop="openImageModal(img, previewPuzzle.answerImages, index)">
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="bg-yellow-900/30 border border-yellow-600 rounded p-3 text-sm text-yellow-200">
+                                    <p>💡 提示: 玩家只能看到汤面，不会看到汤底。请确认此题目合适后再开始游戏。</p>
+                                </div>
+                                
+                                <!-- 游戏设置 -->
+                                <div class="bg-gray-700/50 rounded p-4 border border-gray-600">
+                                    <h4 class="font-bold text-emerald-400 mb-3 text-sm">游戏设置 (可选)</h4>
+                                    <div class="grid grid-cols-2 gap-4">
+                                        <div>
+                                            <label class="block text-xs text-gray-400 mb-1">每人提问上限</label>
+                                            <input v-model="settingsForm.maxQuestionsPerPlayer" type="number" min="1" class="w-full bg-gray-900 rounded p-2 text-white text-sm border border-gray-600 focus:border-emerald-500 focus:outline-none" placeholder="无限制">
+                                        </div>
+                                        <div>
+                                            <label class="block text-xs text-gray-400 mb-1">全员提问总上限</label>
+                                            <input v-model="settingsForm.maxTotalQuestions" type="number" min="1" class="w-full bg-gray-900 rounded p-2 text-white text-sm border border-gray-600 focus:border-emerald-500 focus:outline-none" placeholder="无限制">
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="flex justify-end gap-3 mt-6">
+                                <button @click="showPreviewModal = false; previewPuzzle = null;" class="px-4 py-2 text-gray-400 hover:text-white transition cursor-pointer">取消</button>
+                                <button @click="confirmStartPuzzle" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 rounded text-white font-bold transition cursor-pointer">开始游戏</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 编辑题目模态框 -->
+                    <div v-if="showEditModal" class="fixed inset-0 bg-black/80 flex items-center justify-center z-50">
+                        <div class="bg-gray-800 p-6 rounded-lg w-full max-w-lg border border-gray-700 shadow-2xl max-h-[90vh] overflow-y-auto">
+                            <h3 class="text-xl font-bold mb-4 text-blue-500">编辑题目</h3>
+                            <div class="space-y-4">
+                                <div>
+                                    <label class="block text-sm text-gray-400 mb-1">标题</label>
+                                    <input v-model="editForm.title" class="w-full bg-gray-700 rounded p-2 text-white focus:outline-none focus:border-blue-500 border border-transparent" placeholder="例如：恐怖的电梯">
+                                </div>
+                                <div>
+                                    <label class="block text-sm text-gray-400 mb-1">汤面 (题目) <span class="text-xs text-gray-500">- 文字和图片至少提供一种</span></label>
+                                    <textarea v-model="editForm.content" rows="3" class="w-full bg-gray-700 rounded p-2 text-white focus:outline-none focus:border-blue-500 border border-transparent" placeholder="描述玩家看到的情景... (可选)"></textarea>
+                                    <div class="mt-2">
+                                        <label class="block text-xs text-gray-400 mb-1">图片 (可添加多张)</label>
+                                        <input type="file" @change="handleEditContentImageUpload" accept="image/*" multiple class="w-full text-sm text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-700 file:cursor-pointer">
+                                        <div v-if="editForm.contentImages && editForm.contentImages.length > 0" class="mt-2 grid grid-cols-3 gap-2">
+                                            <div v-for="(img, index) in editForm.contentImages" :key="index" class="relative group">
+                                                <img :src="img" class="w-full h-20 object-cover rounded border border-gray-600">
+                                                <button @click="removeEditContentImage(index)" class="absolute top-1 right-1 bg-red-600 hover:bg-red-700 text-white rounded-full w-5 h-5 text-xs opacity-0 group-hover:opacity-100 transition cursor-pointer">×</button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div>
+                                    <label class="block text-sm text-gray-400 mb-1">汤底 (答案) <span class="text-xs text-gray-500">- 文字和图片至少提供一种</span></label>
+                                    <textarea v-model="editForm.answer" rows="3" class="w-full bg-gray-700 rounded p-2 text-white focus:outline-none focus:border-blue-500 border border-transparent" placeholder="事情的真相是... (可选)"></textarea>
+                                    <div class="mt-2">
+                                        <label class="block text-xs text-gray-400 mb-1">图片 (可添加多张)</label>
+                                        <input type="file" @change="handleEditAnswerImageUpload" accept="image/*" multiple class="w-full text-sm text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-700 file:cursor-pointer">
+                                        <div v-if="editForm.answerImages && editForm.answerImages.length > 0" class="mt-2 grid grid-cols-3 gap-2">
+                                            <div v-for="(img, index) in editForm.answerImages" :key="index" class="relative group">
+                                                <img :src="img" class="w-full h-20 object-cover rounded border border-gray-600">
+                                                <button @click="removeEditAnswerImage(index)" class="absolute top-1 right-1 bg-red-600 hover:bg-red-700 text-white rounded-full w-5 h-5 text-xs opacity-0 group-hover:opacity-100 transition cursor-pointer">×</button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <!-- 游戏设置 -->
+                                <div class="bg-gray-700/50 rounded p-4 border border-gray-600">
+                                    <h4 class="font-bold text-blue-400 mb-3 text-sm">次数限制</h4>
+                                    <div class="grid grid-cols-2 gap-4">
+                                        <div>
+                                            <label class="block text-xs text-gray-400 mb-1">每人提问上限</label>
+                                            <input v-model="editForm.maxQuestionsPerPlayer" type="number" min="1" class="w-full bg-gray-900 rounded p-2 text-white text-sm border border-gray-600 focus:border-blue-500 focus:outline-none" placeholder="无限制">
+                                        </div>
+                                        <div>
+                                            <label class="block text-xs text-gray-400 mb-1">全员提问总上限</label>
+                                            <input v-model="editForm.maxTotalQuestions" type="number" min="1" class="w-full bg-gray-900 rounded p-2 text-white text-sm border border-gray-600 focus:border-blue-500 focus:outline-none" placeholder="无限制">
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="flex justify-end gap-3 mt-6">
+                                <button @click="showEditModal = false" class="px-4 py-2 text-gray-400 hover:text-white transition cursor-pointer">取消</button>
+                                <button @click="submitEditPuzzle" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded text-white font-bold transition cursor-pointer">保存修改</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 自定义题目模态框 -->
+                    <div v-if="showCustomModal" class="fixed inset-0 bg-black/80 flex items-center justify-center z-50">
+                        <div class="bg-gray-800 p-6 rounded-lg w-full max-w-lg border border-gray-700 shadow-2xl max-h-[90vh] overflow-y-auto">
+                            <h3 class="text-xl font-bold mb-4 text-emerald-500">自定义海龟汤</h3>
+                            <div class="space-y-4">
+                                <div>
+                                    <label class="block text-sm text-gray-400 mb-1">标题</label>
+                                    <input v-model="customForm.title" class="w-full bg-gray-700 rounded p-2 text-white focus:outline-none focus:border-emerald-500 border border-transparent" placeholder="例如：恐怖的电梯">
+                                </div>
+                                <div>
+                                    <label class="block text-sm text-gray-400 mb-1">汤面 (题目) <span class="text-xs text-gray-500">- 文字和图片至少提供一种</span></label>
+                                    <textarea v-model="customForm.content" rows="3" class="w-full bg-gray-700 rounded p-2 text-white focus:outline-none focus:border-emerald-500 border border-transparent" placeholder="描述玩家看到的情景... (可选)"></textarea>
+                                    <div class="mt-2">
+                                        <label class="block text-xs text-gray-400 mb-1">图片 (可添加多张)</label>
+                                        <input type="file" @change="handleContentImageUpload" accept="image/*" multiple class="w-full text-sm text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-emerald-600 file:text-white hover:file:bg-emerald-700 file:cursor-pointer">
+                                        <div v-if="customForm.contentImages && customForm.contentImages.length > 0" class="mt-2 grid grid-cols-3 gap-2">
+                                            <div v-for="(img, index) in customForm.contentImages" :key="index" class="relative group">
+                                                <img :src="img" class="w-full h-20 object-cover rounded border border-gray-600">
+                                                <button @click="removeContentImage(index)" class="absolute top-1 right-1 bg-red-600 hover:bg-red-700 text-white rounded-full w-5 h-5 text-xs opacity-0 group-hover:opacity-100 transition cursor-pointer">×</button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div>
+                                    <label class="block text-sm text-gray-400 mb-1">汤底 (答案) <span class="text-xs text-gray-500">- 文字和图片至少提供一种</span></label>
+                                    <textarea v-model="customForm.answer" rows="3" class="w-full bg-gray-700 rounded p-2 text-white focus:outline-none focus:border-emerald-500 border border-transparent" placeholder="事情的真相是... (可选)"></textarea>
+                                    <div class="mt-2">
+                                        <label class="block text-xs text-gray-400 mb-1">图片 (可添加多张)</label>
+                                        <input type="file" @change="handleAnswerImageUpload" accept="image/*" multiple class="w-full text-sm text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-emerald-600 file:text-white hover:file:bg-emerald-700 file:cursor-pointer">
+                                        <div v-if="customForm.answerImages && customForm.answerImages.length > 0" class="mt-2 grid grid-cols-3 gap-2">
+                                            <div v-for="(img, index) in customForm.answerImages" :key="index" class="relative group">
+                                                <img :src="img" class="w-full h-20 object-cover rounded border border-gray-600">
+                                                <button @click="removeAnswerImage(index)" class="absolute top-1 right-1 bg-red-600 hover:bg-red-700 text-white rounded-full w-5 h-5 text-xs opacity-0 group-hover:opacity-100 transition cursor-pointer">×</button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <!-- 游戏设置 -->
+                                <div class="bg-gray-700/50 rounded p-4 border border-gray-600">
+                                    <h4 class="font-bold text-emerald-400 mb-3 text-sm">游戏设置 (可选)</h4>
+                                    <div class="grid grid-cols-2 gap-4">
+                                        <div>
+                                            <label class="block text-xs text-gray-400 mb-1">每人提问上限</label>
+                                            <input v-model="settingsForm.maxQuestionsPerPlayer" type="number" min="1" class="w-full bg-gray-900 rounded p-2 text-white text-sm border border-gray-600 focus:border-emerald-500 focus:outline-none" placeholder="无限制">
+                                        </div>
+                                        <div>
+                                            <label class="block text-xs text-gray-400 mb-1">全员提问总上限</label>
+                                            <input v-model="settingsForm.maxTotalQuestions" type="number" min="1" class="w-full bg-gray-900 rounded p-2 text-white text-sm border border-gray-600 focus:border-emerald-500 focus:outline-none" placeholder="无限制">
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="flex justify-end gap-3 mt-6">
+                                <button @click="showCustomModal = false" class="px-4 py-2 text-gray-400 hover:text-white transition cursor-pointer">取消</button>
+                                <button @click="submitCustomPuzzle" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 rounded text-white font-bold transition cursor-pointer">开始游戏</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 题目显示区域 -->
+                    <div v-if="currentPuzzle" class="bg-gray-800 p-6 -mx-4 md:mx-0 rounded-none md:rounded-lg shadow-lg border-t-4 border-emerald-500 sticky top-0 z-30 md:static transition-all">
+                        <div class="flex justify-between items-start mb-2">
+                            <h2 class="text-2xl font-bold truncate pr-2">{{ currentPuzzle.title }}</h2>
+                            <div v-if="isHost" class="flex gap-2 shrink-0">
+                                <button @click="openEditModal" v-if="!gameOver" class="text-xs bg-blue-600 hover:bg-blue-700 px-3 py-1 rounded text-white cursor-pointer">编辑</button>
+                                <button @click="revealAnswer" v-if="!gameOver" class="text-xs bg-red-600 hover:bg-red-700 px-3 py-1 rounded text-white cursor-pointer">揭晓</button>
+                                <button @click="returnToLobby" class="text-xs bg-gray-600 hover:bg-gray-500 px-3 py-1 rounded text-white cursor-pointer">返回</button>
+                            </div>
+                        </div>
+
+                        <!-- 移动端视图 (可折叠) -->
+                        <div class="md:hidden">
+                            <div class="cursor-pointer group" @click="isPuzzleExpanded = !isPuzzleExpanded">
+                                <p v-if="currentPuzzle.content" :class="{'line-clamp-1': !isPuzzleExpanded}" class="text-lg leading-relaxed text-gray-200 mb-1 transition-all">{{ currentPuzzle.content }}</p>
+                                <div v-if="currentPuzzle.contentImages && currentPuzzle.contentImages.length > 0 && isPuzzleExpanded" class="flex flex-col gap-2 mb-2">
+                                    <img v-for="(img, index) in currentPuzzle.contentImages" :key="index" :src="img" class="w-full rounded border border-gray-600" @click.stop="openImageModal(img, currentPuzzle.contentImages, index)">
+                                </div>
+                                <p v-if="!isPuzzleExpanded" class="text-xs text-gray-500 text-center mt-1 group-hover:text-emerald-400">▼ 点击展开</p>
+                                <p v-else class="text-xs text-gray-500 text-center mt-2">▲ 点击收起</p>
+                            </div>
+                            
+                            <div v-if="(isHost || gameOver) && isPuzzleExpanded" class="mt-2 cursor-pointer" @click="isAnswerExpanded = !isAnswerExpanded">
+                                <div class="p-3 bg-gray-900 rounded border border-gray-700 text-base">
+                                    <h3 class="font-bold text-red-400 mb-1 flex justify-between items-center">
+                                        <span>汤底:</span>
+                                        <span class="text-xs text-gray-500 font-normal">{{ isAnswerExpanded ? '▲ 点击收起' : '▼ 点击展开' }}</span>
+                                    </h3>
+                                    <div v-if="isAnswerExpanded">
+                                        <p v-if="currentPuzzle.answer" class="text-gray-300 mb-2">{{ currentPuzzle.answer }}</p>
+                                        <div v-if="currentPuzzle.answerImages && currentPuzzle.answerImages.length > 0" class="flex flex-col gap-2">
+                                            <img v-for="(img, index) in currentPuzzle.answerImages" :key="index" :src="img" class="w-full rounded border border-gray-600" @click.stop="openImageModal(img, currentPuzzle.answerImages, index)">
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- PC端视图 (总是完整显示) -->
+                        <div class="hidden md:block">
+                            <p v-if="currentPuzzle.content" class="text-lg leading-relaxed text-gray-200 mb-4">{{ currentPuzzle.content }}</p>
+                            <div v-if="currentPuzzle.contentImages && currentPuzzle.contentImages.length > 0" class="flex flex-col gap-2 mb-4">
+                                <img v-for="(img, index) in currentPuzzle.contentImages" :key="index" :src="img" class="w-full rounded border border-gray-600 cursor-pointer" @click="openImageModal(img, currentPuzzle.contentImages, index)">
+                            </div>
+                            
+                            <div v-if="isHost || gameOver" class="mt-6 p-4 bg-gray-900 rounded border border-gray-700">
+                                <h3 class="text-sm font-bold text-red-400 mb-1">汤底 (Answer):</h3>
+                                <p v-if="currentPuzzle.answer" class="text-gray-300 mb-2">{{ currentPuzzle.answer }}</p>
+                                <div v-if="currentPuzzle.answerImages && currentPuzzle.answerImages.length > 0" class="flex flex-col gap-2">
+                                    <img v-for="(img, index) in currentPuzzle.answerImages" :key="index" :src="img" class="w-full rounded border border-gray-600 cursor-pointer" @click="openImageModal(img, currentPuzzle.answerImages, index)">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 等待题目 -->
+                    <div v-if="!currentPuzzle && !isHost" class="bg-gray-800 p-12 rounded-lg text-center text-gray-500">
+                        <p class="text-xl">等待主持人出题...</p>
+                    </div>
+
+                    <!-- 提问历史 -->
+                    <div v-if="currentPuzzle" class="bg-gray-800 p-4 rounded-lg shadow-lg min-h-[400px] flex flex-col">
+                        <h3 class="text-lg font-bold mb-4 border-b border-gray-700 pb-2">推理记录</h3>
+                        <div class="flex-1 overflow-y-auto space-y-4 pr-2 custom-scrollbar" ref="historyBox">
+                            <div v-for="item in history" :key="item.id" :class="{
+                                        'bg-green-700/50': item.answerType === 'yes',
+                                        'bg-red-700/50': item.answerType === 'no',
+                                        'bg-gray-700/50': item.answerType === 'irrelevant',
+                                        'bg-blue-700/50': item.answerType === 'custom',
+                                        'bg-yellow-600/50': item.status === 'pending'
+                                    }" class="bg-gray-700/50 p-3 rounded">
+                                <div class="flex justify-between text-sm text-white/70 mb-1">
+                                    <span>{{ item.nickname }}</span>
+                                    <span v-if="item.status === 'pending'" class="text-yellow-500">等待回答...</span>
+                                </div>
+                                <p class="font-medium text-white mb-2">Q: {{ item.question }}</p>
+                                
+                                <!-- 回答区域 -->
+                                <div v-if="item.status === 'answered'" class="flex items-center gap-2 mt-2 pl-4 border-l-2 border-emerald-500">
+                                    <span class="text-emerald-400 font-bold">A:</span>
+                                    <span :class="{
+                                        'text-green-400': item.answerType === 'yes',
+                                        'text-red-400': item.answerType === 'no',
+                                        'text-gray-400': item.answerType === 'irrelevant',
+                                        'text-blue-400': item.answerType === 'custom'
+                                    }">{{ item.answer }}</span>
+                                </div>
+
+                                <!-- 主持人操作区 -->
+                                <div v-if="isHost && item.status === 'pending'" class="mt-2 flex gap-2 flex-wrap flex-col">
+                                    <div class="flex justify-between gap-4">
+                                        <button @click="answer(item.id, 'yes')" class="px-3 py-1 bg-green-600 hover:bg-green-700 rounded text-base flex-grow cursor-pointer">是</button>
+                                        <button @click="answer(item.id, 'no')" class="px-3 py-1 bg-red-600 hover:bg-red-700 rounded text-base flex-grow cursor-pointer">不是</button>
+                                        <button @click="answer(item.id, 'irrelevant')" class="px-3 py-1 bg-gray-600 hover:bg-gray-500 rounded text-base flex-grow cursor-pointer">不重要</button>
+                                    </div>
+                                    <div class="flex justify-between gap-2">
+                                        <input v-model="customAnswers[item.id]" placeholder="自定义回答" class="bg-gray-900 text-base px-2 py-1 rounded border border-gray-600 w-46 flex-grow-2">
+                                        <button @click="answer(item.id, 'custom')" class="px-2 py-1 bg-blue-600 hover:bg-blue-700 rounded text-base flex-grow cursor-pointer">发送</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 右侧/下方：提问输入框 -->
+                <div class="md:col-span-1">
+                    <div class="bg-gray-800 p-4 rounded-lg shadow-lg sticky top-4">
+                        <div v-if="!isHost && currentPuzzle" class="hidden md:block mb-6">
+                            <h3 class="font-bold mb-2 text-emerald-400 flex justify-between items-center">
+                                <span>提问</span>
+                                <!-- <span v-if="gameLimits.maxQuestionsPerPlayer || gameLimits.maxTotalQuestions" :class="[shouldHighlightRemaining ? 'text-yellow-400 font-bold animate-pulse' : 'text-gray-400 font-normal']" class="text-xs">
+                                    剩余: 
+                                    <span v-if="gameLimits.maxQuestionsPerPlayer">{{ Math.max(0, gameLimits.maxQuestionsPerPlayer - myQuestionCount) }} (个人)</span>
+                                    <span v-if="gameLimits.maxQuestionsPerPlayer && gameLimits.maxTotalQuestions"> + </span>
+                                    <span v-if="gameLimits.maxTotalQuestions">{{ Math.max(0, gameLimits.maxTotalQuestions - publicUsedCount) }} (公共)</span>
+                                </span> -->
+                            </h3>
+                            <textarea v-model="questionText" :disabled="!canAskQuestion" 
+                                class="w-full h-32 bg-gray-700 rounded p-3 text-white focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                                :placeholder="questionPlaceholder"></textarea>
+                            <button @click="sendQuestion" :disabled="!canAskQuestion || !questionText.trim()"
+                                class="w-full mt-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-gray-600 text-white font-bold py-2 rounded transition cursor-pointer">
+                                发送提问
+                            </button>
+                        </div>
+                        
+                        <div>
+                            <h3 class="font-bold mb-2 text-gray-400 text-base flex justify-between items-center">
+                                <span>在线玩家</span>
+                                <span v-if="gameDuration" class="text-sm text-emerald-400 font-mono">{{ gameDuration }}</span>
+                            </h3>
+                            <!-- 主持人查看剩余次数 -->
+                            <div v-if="currentPuzzle && (gameLimits.maxQuestionsPerPlayer || gameLimits.maxTotalQuestions)" class="mb-3 p-2 bg-gray-700/50 rounded border border-gray-600">
+                                <p class="text-xs text-gray-400 mb-1">剩余提问次数:</p>
+                                <div class="text-sm">
+                                    <span v-if="gameLimits.maxTotalQuestions" class="text-emerald-400">
+                                        公共池: <span class="font-bold">{{ Math.max(0, gameLimits.maxTotalQuestions - publicUsedCount) }}</span>/{{ gameLimits.maxTotalQuestions }}
+                                    </span>
+                                    <span v-if="gameLimits.maxQuestionsPerPlayer && gameLimits.maxTotalQuestions" class="text-gray-500 mx-1">|</span>
+                                    <span v-if="gameLimits.maxQuestionsPerPlayer" class="text-blue-400">
+                                        个人上限: {{ gameLimits.maxQuestionsPerPlayer }}
+                                    </span>
+                                </div>
+                            </div>
+                            <ul class="space-y-1 text-sm">
+                                <li v-for="p in players" :key="p.id" class="flex items-center gap-2" :class="{'opacity-50': !p.isOnline}">
+                                    <span class="w-2 h-2 rounded-full" :class="[p.isOnline ? (p.isHost ? 'bg-yellow-400' : 'bg-green-400') : 'bg-gray-500']"></span>
+                                    <span :class="{'text-yellow-400': p.isHost}">{{ p.nickname }}</span>
+                                    <span v-if="!p.isOnline" class="text-xs text-red-400">(离线)</span>
+                                    <span v-if="p.id === myId" class="text-gray-500 text-xs">(我)</span>
+                                    <button v-if="isHost && !p.isOnline" @click="kickPlayer(p.id)" class="ml-auto text-xs bg-red-900/80 hover:bg-red-700 text-white px-2 py-1 rounded border border-red-700 transition cursor-pointer" title="踢出该玩家">踢出</button>
+                                </li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+        
+        <!-- 移动端底部提问栏 -->
+        <div v-if="!isHost && currentPuzzle && !gameOver" class="md:hidden fixed bottom-0 left-0 right-0 bg-gray-800 p-3 border-t border-gray-700 z-40 flex flex-col gap-2 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.3)]">
+            <div v-if="gameLimits.maxQuestionsPerPlayer || gameLimits.maxTotalQuestions" :class="[shouldHighlightRemaining ? 'text-yellow-400 font-bold animate-pulse' : 'text-gray-400']" class="text-xs text-right px-1">
+                剩余: 
+                <span v-if="gameLimits.maxQuestionsPerPlayer">{{ Math.max(0, gameLimits.maxQuestionsPerPlayer - myQuestionCount) }} (个人)</span>
+                <span v-if="gameLimits.maxQuestionsPerPlayer && gameLimits.maxTotalQuestions"> + </span>
+                <span v-if="gameLimits.maxTotalQuestions">{{ Math.max(0, gameLimits.maxTotalQuestions - publicUsedCount) }} (公共)</span>
+            </div>
+            <div class="flex gap-2 items-end">
+                <textarea id="mobile-question-input" v-model="questionText" rows="1" @input="autoResize" :disabled="!canAskQuestion"
+                    class="flex-1 bg-gray-700 rounded p-2 text-white focus:outline-none focus:ring-1 focus:ring-emerald-500 resize-none overflow-hidden min-h-[40px] max-h-[120px] text-sm disabled:opacity-50" 
+                    :placeholder="questionPlaceholder"></textarea>
+                <button @click="sendQuestion" :disabled="!canAskQuestion || !questionText.trim()" 
+                    class="bg-emerald-600 hover:bg-emerald-700 disabled:bg-gray-600 text-white font-bold px-4 py-2 rounded transition h-[40px] flex items-center justify-center text-sm whitespace-nowrap cursor-pointer">
+                    发送
+                </button>
+            </div>
+        </div>
+
+        <!-- 图片查看模态框 -->
+        <div v-if="showImageModal" class="fixed inset-0 bg-black/95 flex items-center justify-center z-[70] select-none" @wheel.prevent="handleWheel">
+            <!-- 左侧切换区域 -->
+            <div v-if="currentImageList.length > 1 && imageScale === 1" @click="prevImage" class="absolute left-0 top-0 bottom-0 w-1/4 cursor-pointer hover:bg-white/5 transition flex items-center justify-start pl-4 z-[75]">
+                <span class="text-white text-4xl opacity-50 hover:opacity-100 transition">‹</span>
+            </div>
+            
+            <!-- 中间图片区域 -->
+            <div class="flex-1 flex items-center justify-center" :class="imageScale === 1 ? 'cursor-pointer' : 'cursor-move'" @click="handleImageClick">
+                <div class="max-w-[95vw] max-h-[95vh] relative overflow-hidden" @touchstart="handleTouchStart" @touchmove="handleTouchMove" @touchend="handleTouchEnd">
+                    <img 
+                        ref="zoomableImage"
+                        :src="currentImageSrc" 
+                        class="max-w-full max-h-[95vh] object-contain transition-transform" 
+                        :style="{
+                            transform: `scale(${imageScale}) translate(${imageTranslate.x}px, ${imageTranslate.y}px)`,
+                            '-webkit-user-drag': 'none',
+                            'touch-action': 'none'
+                        }"
+                        @dblclick="handleDoubleClick"
+                        @mousedown="handleMouseDown"
+                    >
+                    <button @click.stop="closeImageModal" class="absolute top-4 right-4 opacity-45 bg-red-600 hover:bg-red-700 hover:opacity-100 text-white rounded-full w-10 h-10 text-2xl cursor-pointer z-10">×</button>
+                    <!-- 图片计数 -->
+                    <div v-if="currentImageList.length > 1" class="absolute bottom-4 left-1/2 transform -translate-x-1/2 bg-black/70 text-white px-4 py-2 rounded-full text-sm pointer-events-none">
+                        {{ currentImageIndex + 1 }} / {{ currentImageList.length }}
+                    </div>
+                    <!-- 缩放提示 -->
+                    <div v-if="imageScale > 1" class="absolute top-4 left-4 bg-black/70 text-white px-3 py-1 rounded-full text-xs pointer-events-none">
+                        {{ Math.round(imageScale * 100) }}%
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 右侧切换区域 -->
+            <div v-if="currentImageList.length > 1 && imageScale === 1" @click="nextImage" class="absolute right-0 top-0 bottom-0 w-1/4 cursor-pointer hover:bg-white/5 transition flex items-center justify-end pr-4">
+                <span class="text-white text-4xl opacity-50 hover:opacity-100 transition">›</span>
+            </div>
+        </div>
+
+        <!-- 服务器断开连接警告 -->
+        <div v-if="!serverConnected && !showRecoveryDecision && !showRecoveryWaiting" class="fixed bottom-0 left-0 right-0 bg-red-600 text-white py-3 px-4 shadow-lg z-50 animate-pulse">
+            <div class="container mx-auto flex items-center justify-center gap-3">
+                <span class="font-bold text-lg">⚠️ 服务器连接已断开，正在尝试重新连接...</span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const { createApp, ref, onMounted, nextTick } = Vue;
+        let socket; // 延迟初始化
+        let pendingJoinPayload = null; // 在连接建立前缓存 join 请求
+
+        createApp({
+            setup() {
+                const joined = ref(false);
+                const nickname = ref('');
+                const myId = ref('');
+                const isHost = ref(false);
+                const players = ref([]);
+                const puzzleList = ref([]);
+                const currentPuzzle = ref(null);
+                const history = ref([]);
+                const questionText = ref('');
+                const customAnswers = ref({});
+                const gameOver = ref(false);
+                const historyBox = ref(null);
+                const zoomableImage = ref(null);
+                
+                // 自定义题目相关
+                const showCustomModal = ref(false);
+                const customForm = ref({ title: '', content: '', answer: '', contentImages: [], answerImages: [] });
+                const hasHost = ref(false); // 是否已有主持人
+                
+                // 编辑题目相关
+                const showEditModal = ref(false);
+                const editForm = ref({ title: '', content: '', answer: '', contentImages: [], answerImages: [] });
+                
+                // 图片查看相关
+                const showImageModal = ref(false);
+                const currentImageSrc = ref('');
+                const currentImageList = ref([]);
+                const currentImageIndex = ref(0);
+                const imageScale = ref(1); // 图片缩放比例
+                const imageTranslate = ref({ x: 0, y: 0 }); // 图片位移
+                const persistRole = (hostFlag) => {
+                    localStorage.setItem('turtle_role', hostFlag ? 'host' : 'player');
+                };
+                
+                // 题目预览相关
+                const showPreviewModal = ref(false);
+                const previewPuzzle = ref(null);
+                
+                // 申请主持冷却时间
+                const requestHostCooldown = ref(false);
+                
+                // 服务器连接状态
+                const serverConnected = ref(true);
+                
+                // 恢复决定相关
+                const showRecoveryDecision = ref(false);
+                const showRecoveryWaiting = ref(false);
+                
+                // 游戏限制相关
+                const gameLimits = ref({ maxQuestionsPerPlayer: null, maxTotalQuestions: null });
+                const settingsForm = ref({ maxQuestionsPerPlayer: '', maxTotalQuestions: '' });
+                
+                // 游戏时长相关
+                const gameStartTime = ref(null);
+                const gameDuration = ref('');
+                let durationTimer = null;
+
+                const updateDuration = () => {
+                    if (!gameStartTime.value) {
+                        gameDuration.value = '';
+                        return;
+                    }
+                    const now = Date.now();
+                    const diff = Math.floor((now - gameStartTime.value) / 1000);
+                    const hours = Math.floor(diff / 3600).toString().padStart(2, '0');
+                    const minutes = Math.floor((diff % 3600) / 60).toString().padStart(2, '0');
+                    const seconds = (diff % 60).toString().padStart(2, '0');
+                    gameDuration.value = `${hours}:${minutes}:${seconds}`;
+                };
+
+                const startDurationTimer = () => {
+                    if (durationTimer) clearInterval(durationTimer);
+                    updateDuration();
+                    durationTimer = setInterval(updateDuration, 1000);
+                };
+
+                const stopDurationTimer = () => {
+                    if (durationTimer) {
+                        clearInterval(durationTimer);
+                        durationTimer = null;
+                    }
+                    gameDuration.value = '';
+                };
+                
+                const { computed } = Vue;
+                
+                const myQuestionCount = computed(() => {
+                    const storedUserId = localStorage.getItem('turtle_uid');
+                    if (!storedUserId) return 0;
+                    return history.value.filter(q => q.userId === storedUserId).length;
+                });
+                
+                // 计算公共池已用次数
+                const publicUsedCount = computed(() => {
+                    if (!gameLimits.value.maxQuestionsPerPlayer) return 0;
+                    
+                    let used = 0;
+                    const userCounts = {};
+                    
+                    history.value.forEach(q => {
+                        if (!userCounts[q.userId]) userCounts[q.userId] = 0;
+                        if (userCounts[q.userId] >= gameLimits.value.maxQuestionsPerPlayer) {
+                            used++;
+                        }
+                        userCounts[q.userId]++;
+                    });
+                    
+                    return used;
+                });
+                
+                const canAskQuestion = computed(() => {
+                    if (!currentPuzzle.value || gameOver.value) return false;
+                    
+                    // 检查是否有未回答的问题
+                    const storedUserId = localStorage.getItem('turtle_uid');
+                    if (storedUserId) {
+                        const hasPending = history.value.some(q => q.userId === storedUserId && q.status === 'pending');
+                        if (hasPending) return false;
+                    }
+
+                    const limits = gameLimits.value;
+                    
+                    // 情况1: 仅有公共总限制，无个人限制
+                    if (!limits.maxQuestionsPerPlayer && limits.maxTotalQuestions) {
+                        return history.value.length < limits.maxTotalQuestions;
+                    }
+                    
+                    // 情况2: 仅有个人限制，无公共限制
+                    if (limits.maxQuestionsPerPlayer && !limits.maxTotalQuestions) {
+                        return myQuestionCount.value < limits.maxQuestionsPerPlayer;
+                    }
+                    
+                    // 情况3: 同时有个人限制和公共限制
+                    if (limits.maxQuestionsPerPlayer && limits.maxTotalQuestions) {
+                        // 3.1 个人配额未用完 -> 允许
+                        if (myQuestionCount.value < limits.maxQuestionsPerPlayer) {
+                            return true;
+                        }
+                        
+                        // 3.2 个人配额已用完 -> 检查是否所有在线玩家都用完了
+                        const onlinePlayers = players.value.filter(p => p.isOnline && !p.isHost);
+                        // 统计每个在线玩家的已用次数
+                        const userCounts = {};
+                        history.value.forEach(q => {
+                            if (!userCounts[q.userId]) userCounts[q.userId] = 0;
+                            userCounts[q.userId]++;
+                        });
+                        
+                        const someoneHasQuota = onlinePlayers.some(p => {
+                            const used = userCounts[p.userId] || 0;
+                            return used < limits.maxQuestionsPerPlayer;
+                        });
+                        
+                        if (someoneHasQuota) {
+                            return false; // 还有人没用完，必须等待
+                        }
+                        
+                        // 3.3 大家都用完了 -> 检查公共配额
+                        return publicUsedCount.value < limits.maxTotalQuestions;
+                    }
+                    
+                    // 情况4: 无任何限制
+                    return true;
+                });
+                
+                const questionPlaceholder = computed(() => {
+                    // 检查是否有未回答的问题
+                    const storedUserId = localStorage.getItem('turtle_uid');
+                    if (storedUserId) {
+                        const hasPending = history.value.some(q => q.userId === storedUserId && q.status === 'pending');
+                        if (hasPending) return '请等待主持人回答您提出的上一条猜测...';
+                    }
+
+                    if (!canAskQuestion.value) {
+                        const limits = gameLimits.value;
+                        if (limits.maxQuestionsPerPlayer && myQuestionCount.value >= limits.maxQuestionsPerPlayer) {
+                            // 检查是否有人没用完
+                            const onlinePlayers = players.value.filter(p => p.isOnline && !p.isHost);
+                            const userCounts = {};
+                            history.value.forEach(q => {
+                                if (!userCounts[q.userId]) userCounts[q.userId] = 0;
+                                userCounts[q.userId]++;
+                            });
+                            const someoneHasQuota = onlinePlayers.some(p => {
+                                const used = userCounts[p.userId] || 0;
+                                return used < limits.maxQuestionsPerPlayer;
+                            });
+                            
+                            if (someoneHasQuota) return '请等待其他玩家使用完个人次数';
+                            if (limits.maxTotalQuestions && publicUsedCount.value >= limits.maxTotalQuestions) return '全员公共次数已用尽';
+                        }
+                        return '提问次数已用尽';
+                    }
+                    return '输入你的问题... (只能问是/否的问题哦)';
+                });
+                
+                // 计算剩余总次数（个人+公共）
+                const remainingTotal = computed(() => {
+                    const limits = gameLimits.value;
+                    if (!limits.maxQuestionsPerPlayer && !limits.maxTotalQuestions) return null;
+                    
+                    let total = 0;
+                    if (limits.maxQuestionsPerPlayer) {
+                        total += Math.max(0, limits.maxQuestionsPerPlayer - myQuestionCount.value);
+                    }
+                    if (limits.maxTotalQuestions) {
+                        total += Math.max(0, limits.maxTotalQuestions - publicUsedCount.value);
+                    }
+                    return total;
+                });
+                
+                // 是否需要醒目提示（剩余5/10/15等5的倍数）
+                const shouldHighlightRemaining = computed(() => {
+                    const remaining = remainingTotal.value;
+                    if (remaining === null || remaining === 0) return false;
+                    return remaining % 5 === 0 && remaining <= 15;
+                });
+
+                // 移动端UI状态
+                const isPuzzleExpanded = ref(false);
+                const isAnswerExpanded = ref(true); // 汤底展开状态（默认展开）
+                const autoResize = (e) => {
+                    e.target.style.height = 'auto';
+                    e.target.style.height = e.target.scrollHeight + 'px';
+                };
+
+                // 初始化Socket连接和监听器
+                const initSocket = () => {
+                    if (socket) return; // 防止重复连接
+                    socket = io();
+
+                    socket.on('connect', () => {
+                        serverConnected.value = true;
+                        const storedUserId = localStorage.getItem('turtle_uid');
+                        const sessionId = localStorage.getItem('turtle_session_id');
+                        const roleHint = localStorage.getItem('turtle_role');
+
+                        if (pendingJoinPayload) {
+                            socket.emit('join', pendingJoinPayload);
+                            pendingJoinPayload = null;
+                            return;
+                        }
+
+                        // 如果已经加入过游戏（断线重连的情况），自动重新发送join
+                        if (joined.value) {
+                            socket.emit('join', { 
+                                nickname: nickname.value, 
+                                userId: storedUserId,
+                                sessionId,
+                                roleHint
+                            });
+                        }
+                    });
+
+                    socket.on('init_state', (state) => {
+                        // 检查服务器会话ID
+                        const storedSessionId = localStorage.getItem('turtle_session_id');
+                        
+                        // 恢复模式：服务器有保存的游戏状态
+                        if (state.recoveryMode) {
+                            // 检查是否是服务器重启后的情况
+                            if (storedSessionId && state.serverSessionId && storedSessionId !== state.serverSessionId) {
+                                // 服务器重启了，但有可恢复的游戏
+                                localStorage.setItem('turtle_session_id', state.serverSessionId);
+                                
+                                // 先提示服务器重启
+                                alert('服务器已重启');
+                                
+                                // 然后显示恢复决定弹窗
+                                if (state.waitingForRecoveryDecision) {
+                                    if (state.isFirstReconnector) {
+                                        showRecoveryDecision.value = true;
+                                    } else {
+                                        showRecoveryWaiting.value = true;
+                                    }
+                                }
+                                
+                                // 更新状态但不刷新页面
+                                myId.value = state.myId;
+                                if (state.userId) {
+                                    localStorage.setItem('turtle_uid', state.userId);
+                                    localStorage.setItem('turtle_nickname', nickname.value);
+                                }
+                                
+                                players.value = state.players;
+                                const me = state.players.find(p => p.id === state.myId);
+                                isHost.value = me?.isHost || false;
+                                persistRole(isHost.value);
+                                hasHost.value = state.players.some(p => p.isHost);
+                                
+                                currentPuzzle.value = state.currentPuzzle;
+                                history.value = state.history;
+                                puzzleList.value = state.puzzles;
+                                if (state.limits) {
+                                    gameLimits.value = state.limits;
+                                }
+                                if (state.startTime) {
+                                    gameStartTime.value = state.startTime;
+                                    startDurationTimer();
+                                }
+                                scrollToBottom();
+                                return;
+                            }
+                            
+                            // 不清除身份信息，直接恢复
+                            console.log('Recovery mode: restoring previous game state');
+                            localStorage.setItem('turtle_session_id', state.serverSessionId);
+                            
+                            // 如果在等待恢夏决定
+                            if (state.waitingForRecoveryDecision) {
+                                if (state.isFirstReconnector) {
+                                    // 第一个重连的玩家，显示决定弹窗
+                                    showRecoveryDecision.value = true;
+                                } else {
+                                    // 其他玩家，显示等待弹窗
+                                    showRecoveryWaiting.value = true;
+                                }
+                            }
+                        }
+                        // 只有当本地存有旧的sessionId，且与当前服务器不一致时，才视为重启
+                        else if (storedSessionId && state.serverSessionId && storedSessionId !== state.serverSessionId) {
+                            // 服务器已重启，清除旧的身份信息
+                            localStorage.removeItem('turtle_uid');
+                            localStorage.removeItem('turtle_role');
+                            // localStorage.removeItem('turtle_nickname'); // 保留昵称
+                            localStorage.setItem('turtle_session_id', state.serverSessionId);
+                            
+                            // 强制刷新页面以重新登录
+                            alert('服务器已重启，请重新加入游戏');
+                            location.reload();
+                            return;
+                        }
+
+                        // 如果是首次进入（无本地sessionId），保存当前的
+                        if (!storedSessionId && state.serverSessionId) {
+                            localStorage.setItem('turtle_session_id', state.serverSessionId);
+                        }
+
+                        myId.value = state.myId;
+                        // 保存身份信息
+                        if (state.userId) {
+                            localStorage.setItem('turtle_uid', state.userId);
+                            localStorage.setItem('turtle_nickname', nickname.value);
+                        }
+                        
+                        players.value = state.players;
+                        const me = state.players.find(p => p.id === state.myId);
+                        isHost.value = me?.isHost || false;
+                        persistRole(isHost.value);
+                        hasHost.value = state.players.some(p => p.isHost);
+                        
+                        currentPuzzle.value = state.currentPuzzle;
+                        history.value = state.history;
+                        puzzleList.value = state.puzzles;
+                        if (state.limits) {
+                            gameLimits.value = state.limits;
+                        }
+                        if (state.startTime) {
+                            gameStartTime.value = state.startTime;
+                            startDurationTimer();
+                        } else {
+                            stopDurationTimer();
+                        }
+                        scrollToBottom();
+                    });
+
+                    socket.on('player_update', (list) => {
+                        players.value = list;
+                        const me = list.find(p => p.id === myId.value);
+                        if (me) {
+                            isHost.value = me.isHost;
+                            persistRole(me.isHost);
+                        }
+                        hasHost.value = list.some(p => p.isHost);
+                    });
+
+                    socket.on('host_data', (puzzles) => {
+                        puzzleList.value = puzzles;
+                    });
+
+                    socket.on('new_puzzle', (data) => {
+                        // 兼容旧格式
+                        if (data.title) {
+                            currentPuzzle.value = data;
+                        } else {
+                            currentPuzzle.value = data.puzzle;
+                        }
+                        
+                        if (data.limits) {
+                            gameLimits.value = data.limits;
+                        } else {
+                            gameLimits.value = { maxQuestionsPerPlayer: null, maxTotalQuestions: null };
+                        }
+                        
+                        if (data.startTime) {
+                            gameStartTime.value = data.startTime;
+                            startDurationTimer();
+                        }
+
+                        history.value = [];
+                        gameOver.value = false;
+                    });
+
+                    socket.on('puzzle_reveal', (fullPuzzle) => {
+                        currentPuzzle.value = fullPuzzle;
+                    });
+                    
+                    socket.on('puzzle_updated', (data) => {
+                        console.log('[PUZZLE_UPDATED] Received update:', data);
+                        
+                        // 更新题目信息（普通玩家只能看到题面）
+                        if (currentPuzzle.value && data.puzzle) {
+                            // 使用对象展开确保触发响应式更新
+                            currentPuzzle.value = {
+                                ...currentPuzzle.value,
+                                title: data.puzzle.title,
+                                content: data.puzzle.content,
+                                contentImages: data.puzzle.contentImages || []
+                            };
+                            console.log('[PUZZLE_UPDATED] Updated currentPuzzle:', currentPuzzle.value);
+                        }
+                        
+                        // 更新次数限制
+                        if (data.limits) {
+                            gameLimits.value = { ...data.limits };
+                            console.log('[PUZZLE_UPDATED] Updated limits:', gameLimits.value);
+                        }
+                    });
+
+                    socket.on('new_question', (q) => {
+                        history.value.push(q);
+                        scrollToBottom();
+                    });
+
+                    socket.on('question_answered', (updatedQ) => {
+                        const idx = history.value.findIndex(h => h.id === updatedQ.id);
+                        if (idx !== -1) {
+                            history.value[idx] = updatedQ;
+                        }
+                    });
+
+                    socket.on('game_over', (answer) => {
+                        gameOver.value = true;
+                        if (currentPuzzle.value) {
+                            currentPuzzle.value.answer = answer;
+                        }
+                    });
+
+                    socket.on('return_to_lobby', () => {
+                        currentPuzzle.value = null;
+                        history.value = [];
+                        gameOver.value = false;
+                        gameLimits.value = { maxQuestionsPerPlayer: null, maxTotalQuestions: null };
+                        gameStartTime.value = null;
+                        stopDurationTimer();
+                    });
+
+                    socket.on('error_message', (data) => {
+                        alert(data.message);
+                    });
+
+                    socket.on('host_transfer_request', (data) => {
+                        if (confirm(`玩家 ${data.requesterName} 想要成为主持人，是否同意转让主持权？`)) {
+                            socket.emit('approve_host_transfer', data.requesterId);
+                        } else {
+                            socket.emit('reject_host_transfer', data.requesterId);
+                        }
+                    });
+
+                    socket.on('host_transfer_rejected', () => {
+                        alert('主持人拒绝了你的申请');
+                    });
+
+                    socket.on('disconnect', () => {
+                        serverConnected.value = false;
+                        console.log('Server connection lost');
+                    });
+
+                    socket.on('reconnect', () => {
+                        serverConnected.value = true;
+                        console.log('Server reconnected');
+                    });
+
+                    socket.on('recovery_decision_made', (data) => {
+                        showRecoveryDecision.value = false;
+                        showRecoveryWaiting.value = false;
+                        
+                        if (!data.recover) {
+                            // 选择重开新局，刷新页面
+                            location.reload();
+                        }
+                    });
+                };
+
+                const joinGame = () => {
+                    if (!nickname.value.trim()) return;
+                    
+                    // 确保连接已建立
+                    initSocket();
+
+                    // 尝试获取本地存储的 userId
+                    const storedUserId = localStorage.getItem('turtle_uid');
+                    const sessionId = localStorage.getItem('turtle_session_id');
+                    const roleHint = localStorage.getItem('turtle_role');
+                    const payload = {
+                        nickname: nickname.value,
+                        userId: storedUserId,
+                        sessionId,
+                        roleHint
+                    };
+
+                    if (socket?.connected) {
+                        socket.emit('join', payload);
+                    } else {
+                        pendingJoinPayload = payload;
+                    }
+                    joined.value = true;
+                };
+
+                const requestHost = () => {
+                    if (requestHostCooldown.value) {
+                        alert('请稍后再试，冷却时间未结束');
+                        return;
+                    }
+                    
+                    socket.emit('request_host');
+                    requestHostCooldown.value = true;
+                    
+                    setTimeout(() => {
+                        requestHostCooldown.value = false;
+                    }, 8000);
+                };
+
+                const selectPuzzle = (id) => {
+                    socket.emit('select_puzzle', id);
+                };
+                
+                const submitCustomPuzzle = () => {
+                    if (!customForm.value.title) {
+                        alert('请填写标题');
+                        return;
+                    }
+                    
+                    // 验证汤面：文字或图片至少有一个
+                    const hasContentText = customForm.value.content && customForm.value.content.trim();
+                    const hasContentImages = customForm.value.contentImages && customForm.value.contentImages.length > 0;
+                    if (!hasContentText && !hasContentImages) {
+                        alert('汤面必须提供文字或图片（至少一种）');
+                        return;
+                    }
+                    
+                    // 验证汤底：文字或图片至少有一个
+                    const hasAnswerText = customForm.value.answer && customForm.value.answer.trim();
+                    const hasAnswerImages = customForm.value.answerImages && customForm.value.answerImages.length > 0;
+                    if (!hasAnswerText && !hasAnswerImages) {
+                        alert('汤底必须提供文字或图片（至少一种）');
+                        return;
+                    }
+                    
+                    if (!confirm('确定要使用这个自定义题目开始游戏吗？')) {
+                        return;
+                    }
+
+                    // 深拷贝以防止引用问题
+                    const payload = JSON.parse(JSON.stringify(customForm.value));
+                    // 添加限制设置
+                    payload.maxQuestionsPerPlayer = settingsForm.value.maxQuestionsPerPlayer ? parseInt(settingsForm.value.maxQuestionsPerPlayer) : null;
+                    payload.maxTotalQuestions = settingsForm.value.maxTotalQuestions ? parseInt(settingsForm.value.maxTotalQuestions) : null;
+                    
+                    socket.emit('create_custom_puzzle', payload);
+                    
+                    showCustomModal.value = false;
+                    customForm.value = { title: '', content: '', answer: '', contentImages: [], answerImages: [] };
+                    // 重置设置表单
+                    settingsForm.value = { maxQuestionsPerPlayer: '', maxTotalQuestions: '' };
+                };
+
+                const sendQuestion = () => {
+                    if (!questionText.value.trim()) return;
+                    socket.emit('ask_question', questionText.value);
+                    questionText.value = '';
+                    nextTick(() => {
+                        const mobileInput = document.getElementById('mobile-question-input');
+                        if (mobileInput) mobileInput.style.height = 'auto';
+                    });
+                };
+
+                const answer = (questionId, type) => {
+                    const customText = customAnswers.value[questionId];
+                    socket.emit('answer_question', { 
+                        questionId, 
+                        answerType: type, 
+                        customText 
+                    });
+                    // 清理输入框
+                    if (type === 'custom') delete customAnswers.value[questionId];
+                };
+
+                const revealAnswer = () => {
+                    if(confirm('确定要揭晓汤底并结束本局吗？')) {
+                        socket.emit('reveal_answer');
+                    }
+                };
+
+                const returnToLobby = () => {
+                    if(confirm('确定要返回大厅选新题吗？当前进度将丢失。')) {
+                        socket.emit('return_to_lobby');
+                    }
+                };
+
+                const scrollToBottom = () => {
+                    nextTick(() => {
+                        if (historyBox.value) {
+                            historyBox.value.scrollTop = historyBox.value.scrollHeight;
+                        }
+                    });
+                };
+
+                // Socket Listeners
+                onMounted(() => {
+                    // 自动登录检查
+                    const storedNickname = localStorage.getItem('turtle_nickname');
+                    const storedUserId = localStorage.getItem('turtle_uid');
+                    
+                    if (storedNickname) {
+                        nickname.value = storedNickname;
+                    }
+
+                    if (storedNickname && storedUserId) {
+                        joinGame();
+                    }
+                    
+                    // 添加全局鼠标事件监听
+                    document.addEventListener('mousemove', handleMouseMove);
+                    document.addEventListener('mouseup', handleMouseUp);
+                });
+
+                const claimHost = () => {
+                    socket.emit('claim_host');
+                };
+
+                const resignHost = () => {
+                    if (confirm('确定要退出主持人角色吗？')) {
+                        socket.emit('resign_host');
+                    }
+                };
+
+                const previewPuzzleDetails = (puzzle) => {
+                    previewPuzzle.value = puzzle;
+                    showPreviewModal.value = true;
+                    // 重置设置表单
+                    settingsForm.value = { maxQuestionsPerPlayer: '', maxTotalQuestions: '' };
+                };
+
+                const confirmStartPuzzle = () => {
+                    if (!previewPuzzle.value) return;
+                    
+                    const onlinePlayers = players.value.filter(p => p.isOnline);
+                    if (onlinePlayers.length < 2) {
+                        alert('至少需要2名玩家才能开始游戏（包括主持人）');
+                        return;
+                    }
+
+                    const options = {
+                        id: previewPuzzle.value.id,
+                        maxQuestionsPerPlayer: settingsForm.value.maxQuestionsPerPlayer ? parseInt(settingsForm.value.maxQuestionsPerPlayer) : null,
+                        maxTotalQuestions: settingsForm.value.maxTotalQuestions ? parseInt(settingsForm.value.maxTotalQuestions) : null
+                    };
+
+                    socket.emit('select_puzzle', options);
+                    showPreviewModal.value = false;
+                    previewPuzzle.value = null;
+                };
+
+                const recoverGame = () => {
+                    socket.emit('recover_game');
+                    showRecoveryDecision.value = false;
+                };
+
+                const startNewGame = () => {
+                    if (confirm('确定要放弃上一局游戏，开始新游戏吗？')) {
+                        socket.emit('start_new_game');
+                        showRecoveryDecision.value = false;
+                    }
+                };
+
+                const kickPlayer = (playerId) => {
+                    if (confirm('确定要踢出该离线玩家吗？')) {
+                        socket.emit('kick_player', playerId);
+                    }
+                };
+                
+                const openEditModal = () => {
+                    if (!currentPuzzle.value) return;
+                    // 填充当前题目数据
+                    editForm.value = {
+                        title: currentPuzzle.value.title || '',
+                        content: currentPuzzle.value.content || '',
+                        answer: currentPuzzle.value.answer || '',
+                        contentImages: currentPuzzle.value.contentImages ? [...currentPuzzle.value.contentImages] : [],
+                        answerImages: currentPuzzle.value.answerImages ? [...currentPuzzle.value.answerImages] : [],
+                        maxQuestionsPerPlayer: gameLimits.value.maxQuestionsPerPlayer || '',
+                        maxTotalQuestions: gameLimits.value.maxTotalQuestions || ''
+                    };
+                    showEditModal.value = true;
+                };
+                
+                const submitEditPuzzle = () => {
+                    if (!editForm.value.title) {
+                        alert('请填写标题');
+                        return;
+                    }
+                    
+                    // 验证汤面：文字或图片至少有一个
+                    const hasContentText = editForm.value.content && editForm.value.content.trim();
+                    const hasContentImages = editForm.value.contentImages && editForm.value.contentImages.length > 0;
+                    if (!hasContentText && !hasContentImages) {
+                        alert('汤面必须提供文字或图片（至少一种）');
+                        return;
+                    }
+                    
+                    // 验证汤底：文字或图片至少有一个
+                    const hasAnswerText = editForm.value.answer && editForm.value.answer.trim();
+                    const hasAnswerImages = editForm.value.answerImages && editForm.value.answerImages.length > 0;
+                    if (!hasAnswerText && !hasAnswerImages) {
+                        alert('汤底必须提供文字或图片（至少一种）');
+                        return;
+                    }
+                    
+                    if (!confirm('确定要保存修改吗？')) {
+                        return;
+                    }
+
+                    const payload = JSON.parse(JSON.stringify(editForm.value));
+                    payload.maxQuestionsPerPlayer = editForm.value.maxQuestionsPerPlayer ? parseInt(editForm.value.maxQuestionsPerPlayer) : null;
+                    payload.maxTotalQuestions = editForm.value.maxTotalQuestions ? parseInt(editForm.value.maxTotalQuestions) : null;
+                    
+                    socket.emit('update_puzzle', payload);
+                    
+                    showEditModal.value = false;
+                };
+
+                const handleContentImageUpload = (event) => {
+                    const files = event.target.files;
+                    if (!files || files.length === 0) return;
+                    
+                    const maxSize = 3 * 1024 * 1024; // 3MB
+                    
+                    Array.from(files).forEach(file => {
+                        if (!file.type.startsWith('image/')) {
+                            alert(`文件 "${file.name}" 不是图片格式`);
+                            return;
+                        }
+                        
+                        if (file.size > maxSize) {
+                            alert(`图片 "${file.name}" 超过3MB限制 (当前: ${(file.size / 1024 / 1024).toFixed(2)}MB)`);
+                            return;
+                        }
+                        
+                        const reader = new FileReader();
+                        reader.onload = (e) => {
+                            if (!customForm.value.contentImages) {
+                                customForm.value.contentImages = [];
+                            }
+                            customForm.value.contentImages.push(e.target.result);
+                        };
+                        reader.readAsDataURL(file);
+                    });
+                    event.target.value = '';
+                };
+                
+                const handleAnswerImageUpload = (event) => {
+                    const files = event.target.files;
+                    if (!files || files.length === 0) return;
+                    
+                    const maxSize = 3 * 1024 * 1024; // 3MB
+                    
+                    Array.from(files).forEach(file => {
+                        if (!file.type.startsWith('image/')) {
+                            alert(`文件 "${file.name}" 不是图片格式`);
+                            return;
+                        }
+                        
+                        if (file.size > maxSize) {
+                            alert(`图片 "${file.name}" 超过3MB限制 (当前: ${(file.size / 1024 / 1024).toFixed(2)}MB)`);
+                            return;
+                        }
+                        
+                        const reader = new FileReader();
+                        reader.onload = (e) => {
+                            if (!customForm.value.answerImages) {
+                                customForm.value.answerImages = [];
+                            }
+                            customForm.value.answerImages.push(e.target.result);
+                        };
+                        reader.readAsDataURL(file);
+                    });
+                    event.target.value = '';
+                };
+                
+                const removeContentImage = (index) => {
+                    customForm.value.contentImages.splice(index, 1);
+                };
+                
+                const removeAnswerImage = (index) => {
+                    customForm.value.answerImages.splice(index, 1);
+                };
+                
+                const handleEditContentImageUpload = (event) => {
+                    const files = event.target.files;
+                    if (!files || files.length === 0) return;
+                    
+                    const maxSize = 3 * 1024 * 1024; // 3MB
+                    
+                    Array.from(files).forEach(file => {
+                        if (!file.type.startsWith('image/')) {
+                            alert(`文件 "${file.name}" 不是图片格式`);
+                            return;
+                        }
+                        
+                        if (file.size > maxSize) {
+                            alert(`图片 "${file.name}" 超过3MB限制 (当前: ${(file.size / 1024 / 1024).toFixed(2)}MB)`);
+                            return;
+                        }
+                        
+                        const reader = new FileReader();
+                        reader.onload = (e) => {
+                            if (!editForm.value.contentImages) {
+                                editForm.value.contentImages = [];
+                            }
+                            editForm.value.contentImages.push(e.target.result);
+                        };
+                        reader.readAsDataURL(file);
+                    });
+                    event.target.value = '';
+                };
+                
+                const handleEditAnswerImageUpload = (event) => {
+                    const files = event.target.files;
+                    if (!files || files.length === 0) return;
+                    
+                    const maxSize = 3 * 1024 * 1024; // 3MB
+                    
+                    Array.from(files).forEach(file => {
+                        if (!file.type.startsWith('image/')) {
+                            alert(`文件 "${file.name}" 不是图片格式`);
+                            return;
+                        }
+                        
+                        if (file.size > maxSize) {
+                            alert(`图片 "${file.name}" 超过3MB限制 (当前: ${(file.size / 1024 / 1024).toFixed(2)}MB)`);
+                            return;
+                        }
+                        
+                        const reader = new FileReader();
+                        reader.onload = (e) => {
+                            if (!editForm.value.answerImages) {
+                                editForm.value.answerImages = [];
+                            }
+                            editForm.value.answerImages.push(e.target.result);
+                        };
+                        reader.readAsDataURL(file);
+                    });
+                    event.target.value = '';
+                };
+                
+                const removeEditContentImage = (index) => {
+                    editForm.value.contentImages.splice(index, 1);
+                };
+                
+                const removeEditAnswerImage = (index) => {
+                    editForm.value.answerImages.splice(index, 1);
+                };
+                
+                const openImageModal = (src, imageList = [], index = 0) => {
+                    currentImageSrc.value = src;
+                    currentImageList.value = imageList.length > 0 ? imageList : [src];
+                    currentImageIndex.value = imageList.length > 0 ? index : 0;
+                    showImageModal.value = true;
+                };
+                
+                const closeImageModal = () => {
+                    showImageModal.value = false;
+                    currentImageSrc.value = '';
+                    currentImageList.value = [];
+                    currentImageIndex.value = 0;
+                    imageScale.value = 1;
+                    imageTranslate.value = { x: 0, y: 0 };
+                };
+                
+                const prevImage = () => {
+                    if (currentImageList.value.length <= 1) return;
+                    currentImageIndex.value = (currentImageIndex.value - 1 + currentImageList.value.length) % currentImageList.value.length;
+                    currentImageSrc.value = currentImageList.value[currentImageIndex.value];
+                    imageScale.value = 1;
+                    imageTranslate.value = { x: 0, y: 0 };
+                };
+                
+                const nextImage = () => {
+                    if (currentImageList.value.length <= 1) return;
+                    currentImageIndex.value = (currentImageIndex.value + 1) % currentImageList.value.length;
+                    currentImageSrc.value = currentImageList.value[currentImageIndex.value];
+                    imageScale.value = 1;
+                    imageTranslate.value = { x: 0, y: 0 };
+                };
+                
+                // 图片缩放和拖动功能
+                const handleDoubleClick = (e) => {
+                    e.stopPropagation();
+                    if (imageScale.value === 1) {
+                        imageScale.value = 2;
+                    } else {
+                        imageScale.value = 1;
+                        imageTranslate.value = { x: 0, y: 0 };
+                    }
+                };
+                
+                const handleImageClick = (e) => {
+                    if (imageScale.value === 1 && !e.target.closest('img')) {
+                        closeImageModal();
+                    }
+                };
+                
+                const handleWheel = (e) => {
+                    if (!showImageModal.value) return;
+                    e.preventDefault();
+                    
+                    const delta = e.deltaY > 0 ? -0.1 : 0.1;
+                    let newScale = imageScale.value + delta;
+                    newScale = Math.max(1, Math.min(3, newScale)); // 限制100%-300%
+                    
+                    if (newScale === 1) {
+                        imageTranslate.value = { x: 0, y: 0 };
+                    }
+                    imageScale.value = newScale;
+                };
+                
+                // 鼠标拖动
+                let isDragging = false;
+                let dragStart = { x: 0, y: 0 };
+                let translateStart = { x: 0, y: 0 };
+                
+                const handleMouseDown = (e) => {
+                    if (imageScale.value <= 1) return;
+                    isDragging = true;
+                    dragStart = { x: e.clientX, y: e.clientY };
+                    translateStart = { ...imageTranslate.value };
+                    e.preventDefault();
+                };
+                
+                const handleMouseMove = (e) => {
+                    if (!isDragging || imageScale.value <= 1) return;
+                    const deltaX = (e.clientX - dragStart.x) / imageScale.value;
+                    const deltaY = (e.clientY - dragStart.y) / imageScale.value;
+                    imageTranslate.value = {
+                        x: translateStart.x + deltaX,
+                        y: translateStart.y + deltaY
+                    };
+                };
+                
+                const handleMouseUp = () => {
+                    isDragging = false;
+                };
+                
+                // 触摸缩放
+                let touchStart = null;
+                let initialDistance = 0;
+                let initialScale = 1;
+                let touchStartTranslate = { x: 0, y: 0 };
+                let lastTouchTime = 0;
+                
+                const handleTouchStart = (e) => {
+                    if (e.touches.length === 2) {
+                        // 双指缩放
+                        const touch1 = e.touches[0];
+                        const touch2 = e.touches[1];
+                        initialDistance = Math.hypot(
+                            touch2.clientX - touch1.clientX,
+                            touch2.clientY - touch1.clientY
+                        );
+                        initialScale = imageScale.value;
+                        e.preventDefault();
+                    } else if (e.touches.length === 1) {
+                        // 单指拖动或双击
+                        const now = Date.now();
+                        if (now - lastTouchTime < 300) {
+                            // 双击
+                            handleDoubleClick(e);
+                        }
+                        lastTouchTime = now;
+                        
+                        if (imageScale.value > 1) {
+                            touchStart = {
+                                x: e.touches[0].clientX,
+                                y: e.touches[0].clientY
+                            };
+                            touchStartTranslate = { ...imageTranslate.value };
+                        }
+                    }
+                };
+                
+                const handleTouchMove = (e) => {
+                    if (e.touches.length === 2) {
+                        // 双指缩放
+                        const touch1 = e.touches[0];
+                        const touch2 = e.touches[1];
+                        const distance = Math.hypot(
+                            touch2.clientX - touch1.clientX,
+                            touch2.clientY - touch1.clientY
+                        );
+                        let newScale = initialScale * (distance / initialDistance);
+                        newScale = Math.max(1, Math.min(3, newScale)); // 限制100%-300%
+                        
+                        if (newScale === 1) {
+                            imageTranslate.value = { x: 0, y: 0 };
+                        }
+                        imageScale.value = newScale;
+                        e.preventDefault();
+                    } else if (e.touches.length === 1 && touchStart && imageScale.value > 1) {
+                        // 单指拖动
+                        const deltaX = (e.touches[0].clientX - touchStart.x) / imageScale.value;
+                        const deltaY = (e.touches[0].clientY - touchStart.y) / imageScale.value;
+                        imageTranslate.value = {
+                            x: touchStartTranslate.x + deltaX,
+                            y: touchStartTranslate.y + deltaY
+                        };
+                        e.preventDefault();
+                    }
+                };
+                
+                const handleTouchEnd = () => {
+                    touchStart = null;
+                };
+
+                return {
+                    joined, nickname, myId, isHost, players, puzzleList, 
+                    currentPuzzle, history, questionText, customAnswers, gameOver,
+                    joinGame, requestHost, selectPuzzle, sendQuestion, answer, revealAnswer, returnToLobby,
+                    historyBox, showCustomModal, customForm, submitCustomPuzzle, hasHost, claimHost, resignHost,
+                    showPreviewModal, previewPuzzle, previewPuzzleDetails, confirmStartPuzzle, requestHostCooldown,
+                    serverConnected, showRecoveryDecision, showRecoveryWaiting, recoverGame, startNewGame,
+                    isPuzzleExpanded, isAnswerExpanded, autoResize, gameLimits, settingsForm, myQuestionCount, publicUsedCount, canAskQuestion, questionPlaceholder,
+                    kickPlayer, gameDuration, remainingTotal, shouldHighlightRemaining,
+                    handleContentImageUpload, handleAnswerImageUpload, removeContentImage, removeAnswerImage,
+                    showEditModal, editForm, openEditModal, submitEditPuzzle,
+                    handleEditContentImageUpload, handleEditAnswerImageUpload, removeEditContentImage, removeEditAnswerImage,
+                    showImageModal, currentImageSrc, currentImageList, currentImageIndex, openImageModal, closeImageModal, prevImage, nextImage,
+                    zoomableImage, imageScale, imageTranslate,
+                    handleDoubleClick, handleImageClick, handleWheel, handleMouseDown, handleTouchStart, handleTouchMove, handleTouchEnd
+                };
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>

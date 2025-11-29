@@ -1,21 +1,47 @@
+console.log('=== Starting module loading ===');
 const express = require('express');
+console.log('✓ express loaded');
 const http = require('http');
-const { Server } = require('socket.io');
-const path = require('path');
-const fs = require('fs');
+console.log('✓ http loaded');
 
+// Socket.IO 配置优化 - 减少启动时的网络检查
+const { Server } = require('socket.io');
+console.log('✓ socket.io loaded');
+
+const path = require('path');
+console.log('✓ path loaded');
+const fs = require('fs');
+console.log('✓ fs loaded');
+
+console.log('=== Creating server instances ===');
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
+
+// 优化 Socket.IO 配置，禁用不必要的功能以加快启动
+const io = new Server(server, {
+    pingTimeout: 60000,
+    pingInterval: 25000,
+    upgradeTimeout: 10000,
+    maxHttpBufferSize: 30e6, // 增加到 30MB 以支持图片上传
+    transports: ['websocket', 'polling'], // 优先使用 websocket
+    cors: {
+        origin: "*",
+        methods: ["GET", "POST"]
+    }
+});
+
+console.log('Starting Turtle Soup server...');
 
 // 静态文件托管
 app.use(express.static(path.join(__dirname, 'public')));
 
+console.log('Loading puzzle database...');
 // 读取题库
 let puzzles = [];
 try {
     const data = fs.readFileSync(path.join(__dirname, 'data', 'puzzles.json'), 'utf8');
     puzzles = JSON.parse(data);
+    console.log(`Loaded ${puzzles.length} puzzles successfully`);
 } catch (err) {
     console.error("无法读取题库:", err);
 }
@@ -51,6 +77,7 @@ const saveGameState = () => {
 
 // 从文件加载游戏状态
 const loadGameState = () => {
+    console.log('Checking for saved game state...');
     try {
         if (fs.existsSync(GAME_STATE_FILE)) {
             const data = fs.readFileSync(GAME_STATE_FILE, 'utf8');
@@ -59,12 +86,14 @@ const loadGameState = () => {
             // 检查保存时间（例如：24小时内有效）
             const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
             if (Date.now() - savedState.savedAt < TWENTY_FOUR_HOURS) {
-                console.log('Found saved game state from:', new Date(savedState.savedAt));
+                console.log('Found valid saved game state from:', new Date(savedState.savedAt));
                 return savedState;
             } else {
-                console.log('Saved game state expired, ignoring');
+                console.log('Saved game state expired, deleting...');
                 fs.unlinkSync(GAME_STATE_FILE);
             }
+        } else {
+            console.log('No saved game state found');
         }
     } catch (err) {
         console.error('Failed to load game state:', err);
@@ -87,6 +116,12 @@ const clearSavedGameState = () => {
 // 尝试加载之前的游戏状态
 const savedState = loadGameState();
 const hasRecoverableGame = !!savedState;
+
+if (hasRecoverableGame) {
+    console.log('Game state will be available for recovery');
+} else {
+    console.log('Starting fresh game state');
+}
 
 // 游戏状态
 const serverSessionId = Date.now().toString(); // 服务器启动时的唯一会话ID
@@ -389,7 +424,9 @@ io.on('connection', (socket) => {
             id: Date.now(),
             title: puzzleData.title || '自定义海龟汤',
             content: puzzleData.content,
-            answer: puzzleData.answer
+            answer: puzzleData.answer,
+            contentImages: puzzleData.contentImages || [],
+            answerImages: puzzleData.answerImages || []
         };
         
         puzzles.push(newPuzzle);
@@ -410,6 +447,7 @@ io.on('connection', (socket) => {
         io.emit('new_puzzle', {
             title: newPuzzle.title,
             content: newPuzzle.content,
+            contentImages: newPuzzle.contentImages || [],
             limits: gameState.limits,
             startTime: gameState.startTime
         });
@@ -446,10 +484,11 @@ io.on('connection', (socket) => {
                 maxTotalQuestions: options.maxTotalQuestions || null
             };
             
-            // 广播新题目（注意：不发 answer 给普通玩家）
+            // 广播新题目（注意：不发 answer 和 answerImages 给普通玩家）
             io.emit('new_puzzle', {
                 title: puzzle.title,
                 content: puzzle.content,
+                contentImages: puzzle.contentImages || [],
                 limits: gameState.limits,
                 startTime: gameState.startTime
             });
@@ -600,6 +639,65 @@ io.on('connection', (socket) => {
 
         io.emit('game_over', gameState.currentPuzzle.answer);
     });
+    
+    // 更新题目内容和次数限制
+    socket.on('update_puzzle', (data) => {
+        console.log('[UPDATE_PUZZLE] Received update request:', {
+            title: data.title,
+            contentLength: data.content?.length,
+            answerLength: data.answer?.length,
+            contentImages: data.contentImages?.length,
+            answerImages: data.answerImages?.length,
+            maxQuestionsPerPlayer: data.maxQuestionsPerPlayer,
+            maxTotalQuestions: data.maxTotalQuestions,
+            isHost: socket.id === gameState.hostId
+        });
+        
+        if (socket.id !== gameState.hostId) {
+            console.log('[UPDATE_PUZZLE] Rejected: Not host');
+            return;
+        }
+        if (!gameState.currentPuzzle) {
+            console.log('[UPDATE_PUZZLE] Rejected: No current puzzle');
+            return;
+        }
+        
+        // 更新题目信息
+        gameState.currentPuzzle.title = data.title;
+        gameState.currentPuzzle.content = data.content || '';
+        gameState.currentPuzzle.answer = data.answer || '';
+        gameState.currentPuzzle.contentImages = data.contentImages || [];
+        gameState.currentPuzzle.answerImages = data.answerImages || [];
+        
+        // 更新次数限制（正确处理 0 值）
+        gameState.limits = {
+            maxQuestionsPerPlayer: data.maxQuestionsPerPlayer != null ? data.maxQuestionsPerPlayer : null,
+            maxTotalQuestions: data.maxTotalQuestions != null ? data.maxTotalQuestions : null
+        };
+        
+        console.log('[UPDATE_PUZZLE] Updated puzzle:', {
+            title: gameState.currentPuzzle.title,
+            limits: gameState.limits
+        });
+        
+        // 广播更新后的题目（玩家看不到答案）
+        io.emit('puzzle_updated', {
+            puzzle: {
+                title: gameState.currentPuzzle.title,
+                content: gameState.currentPuzzle.content,
+                contentImages: gameState.currentPuzzle.contentImages
+            },
+            limits: gameState.limits
+        });
+        
+        // 单独给主持人发送完整题目（包括答案）
+        socket.emit('puzzle_reveal', gameState.currentPuzzle);
+        
+        // 保存游戏状态
+        saveGameState();
+        
+        console.log(`[UPDATE_PUZZLE] Successfully updated puzzle: ${gameState.currentPuzzle.title}`);
+    });
 
     // 返回大厅（结束当前局）
     socket.on('return_to_lobby', () => {
@@ -653,7 +751,9 @@ io.on('connection', (socket) => {
 });
 
 const PORT = process.env.PORT || 3000;
+console.log(`Attempting to start server on port ${PORT}...`);
 server.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-    console.log(`局域网访问请使用本机IP: http://<YOUR_IP>:${PORT}`);
+    console.log(`\n✓ Server running on port ${PORT}`);
+    console.log(`✓ 本机使用IP: http://localhost:${PORT}`);
+    console.log(`✓ Server ready to accept connections\n`);
 });
